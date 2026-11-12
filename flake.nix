@@ -45,6 +45,21 @@
             cargo = rustToolchain;
             rustc = rustToolchain;
           };
+
+          # Linux で GUI を起動するための実行時依存。
+          # eframe / winit はこれらを dlopen するため、ビルドできるだけでは足りず
+          # 実行時に LD_LIBRARY_PATH へ載っている必要がある。
+          linuxGuiLibs = with pkgs; [
+            wayland
+            libxkbcommon
+            fontconfig
+            libGL
+            vulkan-loader
+            libx11
+            libxcursor
+            libxi
+            libxrandr
+          ];
         in
         {
           packages.default = rustPlatform.buildRustPackage {
@@ -72,10 +87,13 @@
           };
 
           devShells.default = pkgs.mkShell {
-            packages = with pkgs; [
-              rustToolchain
-              pkg-config
-            ];
+            packages =
+              with pkgs;
+              [
+                rustToolchain
+                pkg-config
+              ]
+              ++ pkgs.lib.optionals pkgs.stdenv.isLinux linuxGuiLibs;
 
             env.RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
 
@@ -84,6 +102,9 @@
               echo "  cargo run --release     # ウィンドウを開く"
               echo "  cargo test              # 単体テスト + ヘッドレス描画テスト"
               echo "  cargo build             # ビルド"
+            ''
+            + pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+              export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath linuxGuiLibs}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
             '';
           };
 
