@@ -1,7 +1,12 @@
 ---
-status: Accepted
+status: Superseded
 date: 2026-11-12
+superseded_by: 0016-ui-refresh.md
 ---
+
+> ツールバーのセグメント・丸型アイコンボタンの1pt輪郭は
+> [ADR 0016](0016-ui-refresh.md) で廃止した。`CONTROL_OUTLINE` は
+> 明るい色のカラースウォッチの縁にだけ残している。
 
 # Context
 

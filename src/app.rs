@@ -17,7 +17,7 @@ use eframe::egui::{
 use crate::{
     export, render,
     scene::{Background, History, Item, Scene},
-    theme::{self, ActionIcon, ButtonVariant, SegmentPos},
+    theme::{self, ActionIcon},
     tool::{COLOR_KEYS, PALETTE, TEXT_SIZES, THICKER_KEY, THINNER_KEY, Tool, WIDTHS},
 };
 
@@ -178,12 +178,17 @@ const TOOLBAR_GROUPS: [ToolbarGroup; 5] = [
     ToolbarGroup::Clear,
 ];
 
-const TOOLBAR_GAP: f32 = 4.0;
+const TOOLBAR_PAD_X: i8 = 8;
+const TOOLBAR_PAD_Y: i8 = 4;
+/// グループ（プレート）間の間隔。区切り線は引かない。
+const TOOLBAR_GAP: f32 = 6.0;
 const TOOLBAR_ROW_GAP: f32 = 4.0;
-/// グループ間の区切り線ぶんの間隔（余白 + 線 6pt + 余白）。
-const GROUP_SEPARATOR: f32 = TOOLBAR_GAP * 2.0 + 6.0;
-/// 書き出しボタンと左側グループの最小間隔。
+/// 書き出しグループと左側グループの最小間隔。
 const EXPORT_GAP: f32 = 12.0;
+/// 閉じるボタンと、その左隣の要素との最小間隔。
+const CLOSE_GAP: f32 = 8.0;
+/// 1段目の右端に予約する閉じるボタンぶんの幅（ボタン + 余白）。
+const CLOSE_RESERVE: f32 = theme::ICON_BUTTON_SIZE + CLOSE_GAP;
 
 // ---- 通知（トースト） -------------------------------------------------------
 
@@ -201,9 +206,7 @@ const TOAST_PAD_Y: f32 = 10.0;
 const TOAST_HEADLINE_SIZE: f32 = 12.5;
 const TOAST_DETAIL_SIZE: f32 = 11.0;
 
-const PALETTE_MARGIN_X: i8 = 5;
-const PALETTE_MARGIN_Y: i8 = 4;
-const PALETTE_GAP: f32 = 2.0;
+const PALETTE_GAP: f32 = theme::PLATE_ITEM_GAP;
 
 const TEXT_EDIT_WIDTH: f32 = 260.0;
 const TEXT_EDIT_PADDING: f32 = 14.0;
@@ -212,33 +215,31 @@ const TEXT_EDIT_MIN_HEIGHT: f32 = 30.0;
 const TEXT_BOX_MIN_WIDTH: f32 = 40.0;
 const TEXT_BOX_MIN_HEIGHT: f32 = TEXT_EDIT_MIN_HEIGHT;
 
-fn palette_group_width(count: usize) -> f32 {
-    f32::from(PALETTE_MARGIN_X) * 2.0
-        + theme::SWATCH_SIZE * count as f32
-        + PALETTE_GAP * count.saturating_sub(1) as f32
-}
-
-fn segment_pos(index: usize, total: usize) -> SegmentPos {
-    if index == 0 {
-        SegmentPos::First
-    } else if index + 1 == total {
-        SegmentPos::Last
-    } else {
-        SegmentPos::Middle
-    }
+const fn palette_group_width(count: usize) -> f32 {
+    theme::plate_width(
+        theme::SWATCH_SIZE * count as f32 + PALETTE_GAP * count.saturating_sub(1) as f32,
+    )
 }
 
 /// 幅 `widths` のグループを `max_width` に収まるよう上から順に詰める。
+///
+/// 1行目だけは右端の閉じるボタンぶんを差し引いた `first_row_width` を使う。
 /// 返り値は各行に入るグループの添字。
-fn wrap_groups(widths: &[f32], max_width: f32, separator: f32) -> Vec<Vec<usize>> {
+fn wrap_groups(widths: &[f32], max_width: f32, first_row_width: f32, gap: f32) -> Vec<Vec<usize>> {
     let mut rows: Vec<Vec<usize>> = Vec::new();
     let mut used = 0.0;
 
     for (index, &width) in widths.iter().enumerate() {
+        // 最後の行（まだ行が無ければ1行目）の上限。
+        let limit = if rows.len() <= 1 {
+            first_row_width
+        } else {
+            max_width
+        };
         match rows.last_mut() {
-            Some(row) if !row.is_empty() && used + separator + width <= max_width => {
+            Some(row) if !row.is_empty() && used + gap + width <= limit => {
                 row.push(index);
-                used += separator + width;
+                used += gap + width;
             }
             _ => {
                 rows.push(vec![index]);
@@ -252,19 +253,33 @@ fn wrap_groups(widths: &[f32], max_width: f32, separator: f32) -> Vec<Vec<usize>
 
 fn row_width(row: &[usize], widths: &[f32]) -> f32 {
     let content: f32 = row.iter().map(|&index| widths[index]).sum();
-    let separators = row.len().saturating_sub(1) as f32 * GROUP_SEPARATOR;
-    content + separators
+    let gaps = row.len().saturating_sub(1) as f32 * TOOLBAR_GAP;
+    content + gaps
 }
 
-/// 折り返した行と、右寄せの書き出しボタンを置く行を決める。
-fn plan_toolbar(widths: &[f32], export_width: f32, max_width: f32) -> (Vec<Vec<usize>>, usize) {
-    let mut rows = wrap_groups(widths, max_width, GROUP_SEPARATOR);
+/// 折り返した行と、右寄せの書き出しグループを置く行を決める。
+///
+/// `close_width` は1段目の右端に固定する閉じるボタンの予約幅。折り返しの有無に
+/// 関係なく閉じるボタンとほかのボタンが重ならないよう、1行目の内容幅から差し引く。
+fn plan_toolbar(
+    widths: &[f32],
+    export_width: f32,
+    close_width: f32,
+    max_width: f32,
+) -> (Vec<Vec<usize>>, usize) {
+    let first_row_width = (max_width - close_width).max(0.0);
+    let mut rows = wrap_groups(widths, max_width, first_row_width, TOOLBAR_GAP);
     if rows.is_empty() {
         rows.push(Vec::new());
     }
 
     let last = rows.len() - 1;
-    if max_width - row_width(&rows[last], widths) >= export_width + EXPORT_GAP {
+    let limit = if last == 0 {
+        first_row_width
+    } else {
+        max_width
+    };
+    if limit - row_width(&rows[last], widths) >= export_width + EXPORT_GAP {
         (rows, last)
     } else {
         rows.push(Vec::new());
@@ -314,8 +329,6 @@ pub struct DoodApp {
     capture_next_frame: bool,
     always_on_top: bool,
     canvas_rect: Rect,
-    /// ツールバーの矩形。枠なしウィンドウの移動（ドラッグ）に使う。
-    toolbar_rect: Rect,
 }
 
 impl DoodApp {
@@ -344,7 +357,6 @@ impl DoodApp {
             capture_next_frame: false,
             always_on_top: true,
             canvas_rect: Rect::NOTHING,
-            toolbar_rect: Rect::NOTHING,
         }
     }
 
@@ -621,59 +633,78 @@ impl DoodApp {
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         let mut actions = Vec::new();
 
+        // 幅に応じてグループ単位で折り返す。狭いウィンドウでも全ボタンが画面内に残る。
+        // 1段目の右端は閉じるボタン用に空けておく。
+        let available = ui.available_width();
+        let group_widths = Self::toolbar_group_widths();
+        let export_width = self.export_width(ui);
+        let (rows, export_row) =
+            plan_toolbar(&group_widths, export_width, CLOSE_RESERVE, available);
+
+        let row_count = rows.len();
+        let bar_height = TOOLBAR_PAD_Y as f32 * 2.0
+            + row_count as f32 * theme::ROW_HEIGHT
+            + row_count.saturating_sub(1) as f32 * TOOLBAR_ROW_GAP;
+
         // ウィンドウに枠が無いので、ツールバーの余白ドラッグでウィンドウを動かす。
-        // ボタンより先に登録し、ボタンのクリックを奪わないようにする。
-        if self.toolbar_rect.is_positive() {
-            let drag = ui.interact(
-                self.toolbar_rect,
-                Id::unique("dood_toolbar_drag"),
-                Sense::drag(),
-            );
-            if drag.drag_started() {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-            }
-            if drag.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-            }
+        // 背景をボタンより先に確保し、ボタンのクリックを奪わないようにする。
+        let (_, bar_rect) = ui.allocate_space(egui::vec2(available, bar_height));
+        // 背景ドラッグはフレームをまたいで同じ ID で扱う。
+        let drag = ui.interact(bar_rect, Id::unique("dood_toolbar_drag"), Sense::drag());
+        ui.painter()
+            .rect_filled(bar_rect, egui::CornerRadius::ZERO, theme::SURFACE_CONTAINER);
+        if drag.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        if drag.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
 
-        let frame = egui::Frame::new()
-            .fill(theme::SURFACE_CONTAINER)
-            .inner_margin(egui::Margin::symmetric(10, 8));
+        let inner = bar_rect.shrink2(egui::vec2(TOOLBAR_PAD_X as f32, TOOLBAR_PAD_Y as f32));
+        let mut content = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        content.spacing_mut().item_spacing = Vec2::ZERO;
 
-        let frame_res = frame.show(ui, |ui| {
-            // 幅に応じてグループ単位で折り返す。狭いウィンドウでも全ボタンが画面内に残る。
-            let available = ui.available_width();
-            let group_widths = self.toolbar_group_widths(ui);
-            let export_width = self.export_width(ui);
-            let (rows, export_row) = plan_toolbar(&group_widths, export_width, available);
-
-            for (row_index, row) in rows.iter().enumerate() {
-                if row_index > 0 {
-                    ui.add_space(TOOLBAR_ROW_GAP);
-                }
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    for (cell_index, &group_index) in row.iter().enumerate() {
-                        if cell_index > 0 {
-                            ui.add_space(TOOLBAR_GAP);
-                            theme::toolbar_divider(ui);
-                            ui.add_space(TOOLBAR_GAP);
-                        }
-                        self.draw_toolbar_group(ui, TOOLBAR_GROUPS[group_index], &mut actions);
-                    }
-                    if export_row == row_index {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.spacing_mut().item_spacing.x = 5.0;
-                            self.export_buttons(ui, &mut actions);
-                        });
-                    }
-                });
+        for (row_index, row) in rows.iter().enumerate() {
+            if row_index > 0 {
+                content.add_space(TOOLBAR_ROW_GAP);
             }
-        });
+            content.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for (cell_index, &group_index) in row.iter().enumerate() {
+                    if cell_index > 0 {
+                        ui.add_space(TOOLBAR_GAP);
+                    }
+                    self.draw_toolbar_group(ui, TOOLBAR_GROUPS[group_index], &mut actions);
+                }
 
-        let bar_rect = frame_res.response.rect;
-        self.toolbar_rect = bar_rect;
+                // 閉じる×は折り返し位置に関係なく1段目の右上端に固定する。
+                let with_close = row_index == 0;
+                let with_export = export_row == row_index;
+                if with_close || with_export {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        if with_close
+                            && theme::close_button(ui)
+                                .on_hover_text("閉じる (⌘W)")
+                                .clicked()
+                        {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        if with_export {
+                            if with_close {
+                                ui.add_space(CLOSE_GAP);
+                            }
+                            self.export_buttons(ui, &mut actions);
+                        }
+                    });
+                }
+            });
+        }
+
         ui.painter().line_segment(
             [bar_rect.left_bottom(), bar_rect.right_bottom()],
             Stroke::new(1.0, theme::OUTLINE_VARIANT),
@@ -685,34 +716,22 @@ impl DoodApp {
     }
 
     /// 各グループの横幅。折り返し計算と実際の描画で同じ値を使う。
-    fn toolbar_group_widths(&self, ui: &egui::Ui) -> Vec<f32> {
-        let tools = Tool::ALL
-            .iter()
-            .map(|tool| theme::tool_segment_width(ui, *tool))
-            .sum::<f32>()
-            - (Tool::ALL.len() - 1) as f32; // セグメント間の -1pt の重なり
-
-        let widths = WIDTHS
-            .iter()
-            .map(|width| theme::width_segment_width(ui, *width))
-            .sum::<f32>()
-            - (WIDTHS.len() - 1) as f32;
-
-        let palette = palette_group_width(PALETTE.len());
-        let history = theme::CONTROL_HEIGHT * 2.0 + 3.0;
-        let clear = theme::pill_button_width(ui, "消去");
-
-        vec![tools, palette, widths, history, clear]
+    fn toolbar_group_widths() -> [f32; 5] {
+        [
+            theme::tools_group_width(),
+            palette_group_width(PALETTE.len()),
+            theme::widths_group_width(),
+            theme::history_group_width(),
+            theme::clear_group_width(),
+        ]
     }
 
     fn export_width(&self, ui: &egui::Ui) -> f32 {
-        theme::pill_button_width(ui, "ペースト")
-            + 5.0
-            + theme::pill_button_width(ui, "コピー")
-            + 5.0
-            + theme::pill_button_width(ui, "保存")
-            + 5.0
-            + theme::CONTROL_HEIGHT
+        theme::plate_width(
+            theme::ICON_BUTTON_SIZE * 2.0
+                + theme::PLATE_ITEM_GAP * 2.0
+                + theme::pill_button_width(ui, "保存"),
+        )
     }
 
     fn draw_toolbar_group(
@@ -723,28 +742,31 @@ impl DoodApp {
     ) {
         match group {
             ToolbarGroup::Tools => {
-                // M3 Segmented Button（アイコン＋ラベル）
-                ui.scope(|ui| {
-                    ui.spacing_mut().item_spacing.x = -1.0;
-                    let total = Tool::ALL.len();
-                    for (idx, tool) in Tool::ALL.into_iter().enumerate() {
-                        let pos = segment_pos(idx, total);
-                        let response = theme::tool_segment(ui, tool, self.tool == tool, pos)
-                            .on_hover_text(format!("{} ({})", tool.label(), tool.key_label()));
-                        if response.clicked() {
-                            actions.push(Action::Tool(tool));
+                // アイコンのみ。選択中は secondaryContainer の角丸塗りで示す。
+                theme::group_plate(
+                    ui,
+                    theme::tools_group_width(),
+                    theme::SURFACE_CONTAINER_HIGH,
+                    |ui| {
+                        for tool in Tool::ALL {
+                            let selected = self.tool == tool;
+                            if theme::tool_button(ui, tool, selected)
+                                .on_hover_text(format!("{} ({})", tool.label(), tool.key_label()))
+                                .clicked()
+                            {
+                                actions.push(Action::Tool(tool));
+                            }
                         }
-                    }
-                });
+                    },
+                );
             }
             ToolbarGroup::Palette => {
-                // M3 Surface Container High のピルに円形スウォッチを並べる
-                egui::Frame::new()
-                    .fill(theme::SURFACE_CONTAINER_HIGH)
-                    .corner_radius(egui::CornerRadius::same(theme::PILL_RADIUS))
-                    .inner_margin(egui::Margin::symmetric(PALETTE_MARGIN_X, PALETTE_MARGIN_Y))
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.x = PALETTE_GAP;
+                // 円形スウォッチを Surface Container High の角丸プレートにまとめる。
+                theme::group_plate(
+                    ui,
+                    palette_group_width(PALETTE.len()),
+                    theme::SURFACE_CONTAINER_HIGH,
+                    |ui| {
                         for (index, (name, color)) in PALETTE.iter().enumerate() {
                             let selected = self.color == *color;
                             let tip = if *color == Color32::WHITE {
@@ -759,116 +781,98 @@ impl DoodApp {
                                 actions.push(Action::Color(index));
                             }
                         }
-                    });
+                    },
+                );
             }
             ToolbarGroup::Widths => {
-                // 線幅・文字サイズ（実寸の線幅プレビュー付き）
-                ui.scope(|ui| {
-                    ui.spacing_mut().item_spacing.x = -1.0;
-                    let total = WIDTHS.len();
-                    for (index, width) in WIDTHS.iter().enumerate() {
-                        let pos = segment_pos(index, total);
-                        let tip = format!(
-                            "線の太さ: {width:.0}pt / 文字サイズ: {:.0}px ([ / ] キー)",
-                            TEXT_SIZES[index]
-                        );
-                        if theme::width_segment(ui, *width, self.width_index == index, pos)
-                            .on_hover_text(tip)
-                            .clicked()
-                        {
-                            actions.push(Action::Width(index));
+                // 数値ラベルをやめ、実寸の横棒だけで太さを示す。
+                theme::group_plate(
+                    ui,
+                    theme::widths_group_width(),
+                    theme::SURFACE_CONTAINER_HIGH,
+                    |ui| {
+                        for (index, width) in WIDTHS.iter().enumerate() {
+                            let tip = format!("{width:.0}pt");
+                            if theme::width_button(ui, *width, self.width_index == index)
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                actions.push(Action::Width(index));
+                            }
                         }
-                    }
-                });
+                    },
+                );
             }
             ToolbarGroup::History => {
-                ui.scope(|ui| {
-                    ui.spacing_mut().item_spacing.x = 3.0;
-                    if theme::icon_button(ui, ActionIcon::Undo, self.history.can_undo())
-                        .on_hover_text("元に戻す (⌘Z)")
-                        .clicked()
-                    {
-                        actions.push(Action::Undo);
-                    }
-                    if theme::icon_button(ui, ActionIcon::Redo, self.history.can_redo())
-                        .on_hover_text("やり直す (⇧⌘Z)")
-                        .clicked()
-                    {
-                        actions.push(Action::Redo);
-                    }
-                });
+                theme::group_plate(
+                    ui,
+                    theme::history_group_width(),
+                    theme::SURFACE_CONTAINER_HIGH,
+                    |ui| {
+                        if theme::flat_icon_button(ui, ActionIcon::Undo, self.history.can_undo())
+                            .on_hover_text("元に戻す (⌘Z)")
+                            .clicked()
+                        {
+                            actions.push(Action::Undo);
+                        }
+                        if theme::flat_icon_button(ui, ActionIcon::Redo, self.history.can_redo())
+                            .on_hover_text("やり直す (⇧⌘Z)")
+                            .clicked()
+                        {
+                            actions.push(Action::Redo);
+                        }
+                    },
+                );
             }
             ToolbarGroup::Clear => {
                 let can_clear = !self.scene.items.is_empty() || self.scene.bg.is_some();
-                if theme::pill_button(
+                theme::group_plate(
                     ui,
-                    ActionIcon::Clear,
-                    "消去",
-                    ButtonVariant::OutlinedError,
-                    can_clear,
-                )
-                .on_hover_text("すべて消去 (⌘⌫)")
-                .clicked()
-                {
-                    actions.push(Action::Clear);
-                }
+                    theme::clear_group_width(),
+                    theme::SURFACE_CONTAINER_HIGH,
+                    |ui| {
+                        if theme::clear_button(ui, can_clear)
+                            .on_hover_text("すべて消去 (⌘⌫)")
+                            .clicked()
+                        {
+                            actions.push(Action::Clear);
+                        }
+                    },
+                );
             }
         }
     }
 
-    /// 右寄せの書き出し・貼り付けボタン。Right-to-Left レイアウトなので
-    /// 保存 → コピー → ペースト の順に置く（画面では左から ペースト・コピー・保存）。
+    /// 右寄せの書き出しグループ。プレート内は左から ペースト・コピー・保存。
     fn export_buttons(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        // 右寄せレイアウトなので、最初に置いたものが右端になる。
-        if theme::close_button(ui)
-            .on_hover_text("閉じる (⌘W)")
-            .clicked()
-        {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-        }
-
+        let width = self.export_width(ui);
         let save_tip = format!(
             "PNG を保存してパスをコピー (⌘S)\n保存先: {}",
             self.out_path.display()
         );
-        if theme::pill_button(
-            ui,
-            ActionIcon::Save,
-            "保存",
-            ButtonVariant::FilledPrimary,
-            true,
-        )
-        .on_hover_text(save_tip)
-        .clicked()
-        {
-            actions.push(Action::Export(ExportKind::Save));
-        }
 
-        if theme::pill_button(
-            ui,
-            ActionIcon::Copy,
-            "コピー",
-            ButtonVariant::FilledTonal,
-            true,
-        )
-        .on_hover_text("キャンバスを PNG でクリップボードへコピー (⌘C)")
-        .clicked()
-        {
-            actions.push(Action::Export(ExportKind::Copy));
-        }
+        theme::group_plate(ui, width, theme::SURFACE_CONTAINER_HIGH, |ui| {
+            if theme::flat_icon_button(ui, ActionIcon::Paste, true)
+                .on_hover_text("クリップボードから画像を貼り付ける (⌘⇧V)")
+                .clicked()
+            {
+                actions.push(Action::PasteImage);
+            }
 
-        if theme::pill_button(
-            ui,
-            ActionIcon::Paste,
-            "ペースト",
-            ButtonVariant::FilledTonal,
-            true,
-        )
-        .on_hover_text("クリップボードから画像を貼り付ける (⌘⇧V)")
-        .clicked()
-        {
-            actions.push(Action::PasteImage);
-        }
+            if theme::flat_icon_button(ui, ActionIcon::Copy, true)
+                .on_hover_text("キャンバスを PNG でクリップボードへコピー (⌘C)")
+                .clicked()
+            {
+                actions.push(Action::Export(ExportKind::Copy));
+            }
+
+            if theme::save_button(ui, "保存")
+                .on_hover_text(save_tip)
+                .clicked()
+            {
+                actions.push(Action::Export(ExportKind::Save));
+            }
+        });
     }
 
     /// 画面右上（ツールバーの下）に通知を一時表示する。
@@ -1631,7 +1635,6 @@ mod tests {
             capture_next_frame: false,
             always_on_top: true,
             canvas_rect: Rect::NOTHING,
-            toolbar_rect: Rect::NOTHING,
         }
     }
 
@@ -1745,44 +1748,107 @@ mod tests {
 
     // ---- ツールバーの折り返し ----------------------------------------
 
-    const SAMPLE_WIDTHS: [f32; 5] = [380.0, 164.0, 150.0, 67.0, 62.0];
+    /// 1100pt ウィンドウ（左右余白 8pt を引いた幅）。
+    const WIDE_AVAILABLE: f32 = 1084.0;
+    /// 480pt ウィンドウ（左右余白 8pt を引いた幅）。
+    const NARROW_AVAILABLE: f32 = 464.0;
+    /// 保存ボタンの実幅はフォント依存なので、テストでは控えめな固定値を使う。
+    const SAMPLE_EXPORT_WIDTH: f32 = 152.0;
 
-    #[test]
-    fn wide_toolbar_fits_on_one_row() {
-        let (rows, export_row) = plan_toolbar(&SAMPLE_WIDTHS, 150.0, 1080.0);
-        assert_eq!(rows, vec![vec![0, 1, 2, 3, 4]]);
-        assert_eq!(export_row, 0);
+    fn sample_widths() -> [f32; 5] {
+        [
+            theme::tools_group_width(),
+            palette_group_width(PALETTE.len()),
+            theme::widths_group_width(),
+            theme::history_group_width(),
+            theme::clear_group_width(),
+        ]
     }
 
     #[test]
-    fn narrow_toolbar_wraps_without_splitting_groups() {
-        let max = 460.0;
-        let (rows, export_row) = plan_toolbar(&SAMPLE_WIDTHS, 150.0, max);
+    fn wide_toolbar_fits_on_one_row() {
+        let widths = sample_widths();
+        let (rows, export_row) =
+            plan_toolbar(&widths, SAMPLE_EXPORT_WIDTH, CLOSE_RESERVE, WIDE_AVAILABLE);
 
-        assert!(rows.len() >= 2, "折り返されていない: {rows:?}");
-        for row in &rows {
+        assert_eq!(rows, vec![vec![0, 1, 2, 3, 4]]);
+        assert_eq!(export_row, 0);
+        // 閉じる×・書き出し・全グループが重ならずに1段へ収まる。
+        assert!(
+            row_width(&rows[0], &widths) + EXPORT_GAP + SAMPLE_EXPORT_WIDTH + CLOSE_RESERVE
+                <= WIDE_AVAILABLE + 0.01,
+            "1段に収まらない: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn narrow_toolbar_wraps_to_exactly_two_rows() {
+        let widths = sample_widths();
+        let (rows, export_row) = plan_toolbar(
+            &widths,
+            SAMPLE_EXPORT_WIDTH,
+            CLOSE_RESERVE,
+            NARROW_AVAILABLE,
+        );
+
+        assert_eq!(rows, vec![vec![0, 1], vec![2, 3, 4]]);
+        assert_eq!(export_row, 1);
+        for (index, row) in rows.iter().enumerate() {
+            let limit = if index == 0 {
+                NARROW_AVAILABLE - CLOSE_RESERVE
+            } else {
+                NARROW_AVAILABLE
+            };
             assert!(
-                row_width(row, &SAMPLE_WIDTHS) <= max + 0.01,
+                row_width(row, &widths) <= limit + 0.01,
                 "行がはみ出している: {row:?}"
             );
         }
-        assert_eq!(export_row, rows.len() - 1);
+        assert!(
+            row_width(&rows[export_row], &widths) + EXPORT_GAP + SAMPLE_EXPORT_WIDTH
+                <= NARROW_AVAILABLE + 0.01
+        );
+    }
 
-        let placed: usize = rows.iter().map(Vec::len).sum();
-        assert_eq!(placed, SAMPLE_WIDTHS.len(), "グループが欠落している");
+    #[test]
+    fn first_row_reserves_room_for_the_close_button() {
+        // 460pt なら閉じる×を予約しなければ1段に収まる幅。
+        let widths = [390.0, 30.0];
+        let (rows, export_row) = plan_toolbar(&widths, 10.0, CLOSE_RESERVE, 460.0);
+
+        assert_eq!(rows, vec![vec![0], vec![1]], "閉じる×の幅を予約していない");
+        assert_eq!(export_row, 1);
+        assert!(row_width(&rows[0], &widths) + CLOSE_RESERVE <= 460.0 + 0.01);
+        assert!(row_width(&rows[1], &widths) + EXPORT_GAP + 10.0 <= 460.0 + 0.01);
     }
 
     #[test]
     fn export_gets_its_own_row_when_it_does_not_fit() {
-        let (rows, export_row) = plan_toolbar(&[400.0], 150.0, 460.0);
+        let widths = [400.0];
+        let (rows, export_row) = plan_toolbar(&widths, 150.0, CLOSE_RESERVE, 460.0);
         assert_eq!(rows, vec![vec![0], vec![]]);
         assert_eq!(export_row, 1);
     }
 
     #[test]
     fn palette_width_matches_swatch_layout() {
-        // 余白 5*2 + スウォッチ 24*6 + 間隔 2*5
-        assert_eq!(palette_group_width(6), 10.0 + 144.0 + 10.0);
+        // 左右余白 4*2 + スウォッチ 24*6 + 間隔 2*5
+        assert_eq!(palette_group_width(6), 8.0 + 144.0 + 10.0);
+    }
+
+    #[test]
+    fn toolbar_heights_match_the_design_targets() {
+        let one_row = TOOLBAR_PAD_Y as f32 * 2.0 + theme::ROW_HEIGHT;
+        let two_rows = one_row + TOOLBAR_ROW_GAP + theme::ROW_HEIGHT;
+
+        assert!(
+            (44.0..=48.0).contains(&one_row),
+            "1段の高さが目標外: {one_row}"
+        );
+        assert!(
+            (80.0..=84.0).contains(&two_rows),
+            "2段の高さが目標外: {two_rows}"
+        );
     }
 
     // ---- テキスト入力 ------------------------------------------------
@@ -1873,6 +1939,78 @@ mod tests {
             .clone()
     }
 
+    /// `pos` を1回クリックし、その間に出た viewport コマンドを返す。
+    fn click_at(app: &mut DoodApp, ctx: &egui::Context, pos: Pos2) -> Vec<egui::ViewportCommand> {
+        let _ = ui_frame(app, ctx, vec![egui::Event::PointerMoved(pos)]);
+        let press = ui_frame(
+            app,
+            ctx,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+        let release = ui_frame(
+            app,
+            ctx,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+        [press, release]
+            .iter()
+            .flat_map(viewport_commands)
+            .collect()
+    }
+
+    #[test]
+    fn toolbar_clicks_select_a_tool_and_clear() {
+        let mut app = test_app();
+        let ctx = egui::Context::default();
+        let _ = ui_frame(&mut app, &ctx, Vec::new());
+        let _ = ui_frame(&mut app, &ctx, Vec::new());
+
+        // ツールプレート内の3番目（矢印）をクリックする。
+        let _ = click_at(&mut app, &ctx, Pos2::new(110.0, 22.0));
+        assert_eq!(app.tool, Tool::Arrow, "ツールアイコンが選択できない");
+
+        // 空のシーンでは消去が無効（履歴に空の状態を積まない）。
+        let _ = click_at(&mut app, &ctx, Pos2::new(642.0, 22.0));
+        assert!(
+            !app.history.can_undo(),
+            "空のシーンで消去が有効になっている"
+        );
+
+        app.push_item(Item::Line {
+            a: Pos2::ZERO,
+            b: Pos2::new(10.0, 10.0),
+            color: Color32::BLACK,
+            width: 2.0,
+        });
+        let _ = click_at(&mut app, &ctx, Pos2::new(642.0, 22.0));
+        assert!(app.scene.items.is_empty(), "消去ボタンが効かない");
+    }
+
+    #[test]
+    fn clicking_the_close_button_requests_closing_the_window() {
+        let mut app = test_app();
+        let ctx = egui::Context::default();
+        let _ = ui_frame(&mut app, &ctx, Vec::new());
+        let _ = ui_frame(&mut app, &ctx, Vec::new());
+
+        // 1段目の右上端（右余白8pt + ボタン32ptの中心）。
+        let commands = click_at(&mut app, &ctx, Pos2::new(1076.0, 22.0));
+        assert!(
+            commands.contains(&egui::ViewportCommand::Close),
+            "× ボタンがウィンドウを閉じない: {commands:?}"
+        );
+    }
+
     #[test]
     fn dragging_the_toolbar_background_starts_a_window_drag() {
         let mut app = test_app();
@@ -1882,8 +2020,8 @@ mod tests {
         let _ = ui_frame(&mut app, &ctx, Vec::new());
         let _ = ui_frame(&mut app, &ctx, Vec::new());
 
-        // 1段目の上余白（ボタンの無いところ）を押して動かす。
-        let start = Pos2::new(1000.0, 2.0);
+        // グループ間の余白（ボタンの無いところ）を押して動かす。
+        let start = Pos2::new(800.0, 22.0);
         let press_output = ui_frame(
             &mut app,
             &ctx,
@@ -1920,7 +2058,7 @@ mod tests {
         let _ = ui_frame(&mut app, &ctx, Vec::new());
         let _ = ui_frame(&mut app, &ctx, Vec::new());
 
-        // 2番目のセグメント（矢印）の上から動かす。ボタンがドラッグを受け取る。
+        // 3番目のツール（矢印）の上から動かす。ボタンがドラッグを受け取る。
         let start = Pos2::new(110.0, 24.0);
         let outputs = [
             ui_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(start)]),

@@ -58,7 +58,25 @@ pub const CONTROL_OUTLINE: Color32 = Color32::from_rgb(0xBC, 0xAE, 0xC7);
 
 /// ツールバー内の標準コントロール高さ（M3 Compact Density: 32pt）。
 pub const CONTROL_HEIGHT: f32 = 32.0;
+/// グループを載せるプレートの角丸。
+pub const PLATE_RADIUS: u8 = 10;
+/// プレート内のボタンの角丸（選択・ホバーの塗り）。
+pub const BUTTON_RADIUS: u8 = 8;
+/// プレートの内側余白。
+pub const PLATE_PAD_X: f32 = 4.0;
+pub const PLATE_PAD_Y: f32 = 2.0;
+/// プレート内のボタン間隔。
+pub const PLATE_ITEM_GAP: f32 = 2.0;
+/// プレート1枚の高さ。ツールバーの行の高さでもある。
+pub const ROW_HEIGHT: f32 = CONTROL_HEIGHT + PLATE_PAD_Y * 2.0;
 pub const PILL_RADIUS: u8 = 16;
+
+/// 描画ツールのアイコンボタン幅（文字ラベルは持たない）。
+pub const TOOL_BUTTON_WIDTH: f32 = 36.0;
+/// 線幅ボタンの幅。
+pub const WIDTH_BUTTON_WIDTH: f32 = 36.0;
+/// 枠なしアイコンボタン（元に戻す・やり直す・消去・ペースト・コピー・閉じる）の一辺。
+pub const ICON_BUTTON_SIZE: f32 = 32.0;
 
 /// カラースウォッチの当たり判定（正方形）の一辺。
 pub const SWATCH_SIZE: f32 = 24.0;
@@ -202,16 +220,12 @@ pub fn disabled_fg() -> Color32 {
 
 // ---- Text metrics ----------------------------------------------------------
 
-const TOOL_LABEL_SIZE: f32 = 12.5;
-const WIDTH_LABEL_SIZE: f32 = 12.0;
 const PILL_LABEL_SIZE: f32 = 12.5;
-
 const ICON_SIZE: f32 = 14.0;
 const ICON_GAP: f32 = 4.0;
-const SEGMENT_PAD_X: f32 = 8.0;
-const WIDTH_PREVIEW_WIDTH: f32 = 12.0;
-const WIDTH_PAD_X: f32 = 7.0;
 const PILL_PAD_X: f32 = 10.0;
+/// 線幅プレビューの横棒の長さ。
+const WIDTH_PREVIEW_LENGTH: f32 = 18.0;
 
 fn label_galley(ui: &Ui, text: &str, size: f32) -> std::sync::Arc<Galley> {
     ui.painter()
@@ -234,56 +248,64 @@ fn paint_label(
     painter.galley_with_override_text_color(top_left, galley, color);
 }
 
-fn tool_segment_metrics(ui: &Ui, tool: Tool) -> (f32, std::sync::Arc<Galley>) {
-    let galley = label_galley(ui, tool.label(), TOOL_LABEL_SIZE);
-    let width = (SEGMENT_PAD_X * 2.0 + ICON_SIZE + ICON_GAP + galley.size().x).ceil();
-    (width, galley)
-}
-
-/// ツールセグメントの横幅（ツールバーの折り返し計算に使う）。
-pub fn tool_segment_width(ui: &Ui, tool: Tool) -> f32 {
-    tool_segment_metrics(ui, tool).0
-}
-
-/// 太さセグメントの横幅（ツールバーの折り返し計算に使う）。
-pub fn width_segment_width(ui: &Ui, width_pt: f32) -> f32 {
-    let galley = label_galley(ui, &format!("{width_pt:.0}pt"), WIDTH_LABEL_SIZE);
-    (WIDTH_PAD_X * 2.0 + WIDTH_PREVIEW_WIDTH + ICON_GAP + galley.size().x).ceil()
-}
-
 /// アイコン付きピルボタンの横幅（ツールバーの折り返し計算に使う）。
 pub fn pill_button_width(ui: &Ui, label: &str) -> f32 {
     let galley = label_galley(ui, label, PILL_LABEL_SIZE);
     (PILL_PAD_X * 2.0 + ICON_SIZE + ICON_GAP + galley.size().x).ceil()
 }
 
-// ---- M3 Segmented Button ---------------------------------------------------
+// ---- Toolbar plate geometry ------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum SegmentPos {
-    First,
-    Middle,
-    Last,
+/// プレートの幅（内側のコンテンツ幅から外側の寸法を求める）。
+pub const fn plate_width(content_width: f32) -> f32 {
+    content_width + PLATE_PAD_X * 2.0
 }
 
-impl SegmentPos {
-    pub fn corner_radius(self) -> CornerRadius {
-        match self {
-            SegmentPos::First => CornerRadius {
-                nw: PILL_RADIUS,
-                sw: PILL_RADIUS,
-                ne: 0,
-                se: 0,
-            },
-            SegmentPos::Middle => CornerRadius::ZERO,
-            SegmentPos::Last => CornerRadius {
-                nw: 0,
-                sw: 0,
-                ne: PILL_RADIUS,
-                se: PILL_RADIUS,
-            },
-        }
-    }
+/// 描画ツール6個を並べたプレートの幅。
+pub const fn tools_group_width() -> f32 {
+    let count = Tool::ALL.len();
+    plate_width(
+        TOOL_BUTTON_WIDTH * count as f32 + PLATE_ITEM_GAP * (count.saturating_sub(1)) as f32,
+    )
+}
+
+/// 線幅3個を並べたプレートの幅。
+pub const fn widths_group_width() -> f32 {
+    let count = crate::tool::WIDTHS.len();
+    plate_width(
+        WIDTH_BUTTON_WIDTH * count as f32 + PLATE_ITEM_GAP * (count.saturating_sub(1)) as f32,
+    )
+}
+
+/// 元に戻す・やり直すを並べたプレートの幅。
+pub const fn history_group_width() -> f32 {
+    plate_width(ICON_BUTTON_SIZE * 2.0 + PLATE_ITEM_GAP)
+}
+
+/// 消去ボタン1個のプレートの幅。
+pub const fn clear_group_width() -> f32 {
+    plate_width(ICON_BUTTON_SIZE)
+}
+
+// ---- M3 Toolbar Plates -----------------------------------------------------
+
+/// ツールバーのグループをまとめる角丸プレート。
+///
+/// 各ボタンの1pt枠線の代わりに、グループ単位の面（`SURFACE_CONTAINER_HIGH`）で
+/// まとまりを示す。中身は左から右へ、固定幅で並べる。
+pub fn group_plate(ui: &mut Ui, width: f32, fill: Color32, add_contents: impl FnOnce(&mut Ui)) {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, ROW_HEIGHT), Sense::hover());
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(PLATE_RADIUS), fill);
+
+    let inner = rect.shrink2(vec2(PLATE_PAD_X, PLATE_PAD_Y));
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    child.spacing_mut().item_spacing = vec2(PLATE_ITEM_GAP, 0.0);
+    add_contents(&mut child);
 }
 
 /// ツールバーのボタンが受け取る入力。
@@ -294,123 +316,166 @@ fn button_sense() -> Sense {
     Sense::click_and_drag()
 }
 
-/// 描画ツール用の M3 Segmented Button セグメント。アイコン＋ラベルを表示する。
-pub fn tool_segment(ui: &mut Ui, tool: Tool, selected: bool, pos: SegmentPos) -> Response {
-    let (width, text_galley) = tool_segment_metrics(ui, tool);
-
-    let (rect, response) = ui.allocate_exact_size(vec2(width, CONTROL_HEIGHT), button_sense());
-    if response.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+/// 選択・ホバー時の塗り。プレートの面を基準に state layer を重ねる。
+fn selection_fill(selected: bool, hovered: bool, pressed: bool) -> Color32 {
+    if !selected && !hovered && !pressed {
+        return Color32::TRANSPARENT;
     }
-
-    let base_fill = if selected {
+    let base = if selected {
         SECONDARY_CONTAINER
     } else {
-        SURFACE_CONTAINER_LOWEST
+        SURFACE_CONTAINER_HIGH
     };
-    let fg = if selected {
+    let state = if selected {
         ON_SECONDARY_CONTAINER
     } else {
         ON_SURFACE
     };
-    let fill = if response.is_pointer_button_down_on() {
-        blend_state(base_fill, fg, 0.12)
-    } else if response.hovered() {
-        blend_state(base_fill, fg, 0.08)
+    if pressed {
+        blend_state(base, state, 0.12)
+    } else if hovered {
+        blend_state(base, state, 0.08)
     } else {
-        base_fill
-    };
+        SECONDARY_CONTAINER
+    }
+}
 
-    let radius = pos.corner_radius();
+fn selection_fg(selected: bool, hovered: bool) -> Color32 {
+    if selected {
+        ON_SECONDARY_CONTAINER
+    } else if hovered {
+        ON_SURFACE
+    } else {
+        ON_SURFACE_VARIANT
+    }
+}
+
+/// 描画ツールのアイコンのみのボタン。選択中は `secondaryContainer` で塗る。
+pub fn tool_button(ui: &mut Ui, tool: Tool, selected: bool) -> Response {
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(TOOL_BUTTON_WIDTH, CONTROL_HEIGHT), button_sense());
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    let fg = selection_fg(selected, response.hovered());
+    let fill = selection_fill(
+        selected,
+        response.hovered(),
+        response.is_pointer_button_down_on(),
+    );
+
     let painter = ui.painter();
-    painter.rect_filled(rect, radius, fill);
-    painter.rect_stroke(
-        rect,
-        radius,
-        Stroke::new(1.0, CONTROL_OUTLINE),
-        StrokeKind::Inside,
-    );
-
-    let icon_rect = Rect::from_center_size(
-        pos2(
-            rect.min.x + SEGMENT_PAD_X + ICON_SIZE * 0.5,
-            rect.center().y,
-        ),
-        Vec2::splat(ICON_SIZE),
-    );
+    painter.rect_filled(rect, CornerRadius::same(BUTTON_RADIUS), fill);
+    let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(15.0));
     draw_tool_icon(painter, icon_rect, tool, fg);
-
-    paint_label(
-        painter,
-        icon_rect.max.x + ICON_GAP,
-        rect.center().y,
-        text_galley,
-        fg,
-    );
 
     response
 }
 
-/// 線幅・文字サイズ用の M3 Segmented Button セグメント。実寸の線幅プレビュー＋ラベルを表示する。
-pub fn width_segment(ui: &mut Ui, width_pt: f32, selected: bool, pos: SegmentPos) -> Response {
-    let label = format!("{width_pt:.0}pt");
-    let text_galley = label_galley(ui, &label, WIDTH_LABEL_SIZE);
-    let total_width = width_segment_width(ui, width_pt);
-
+/// 線幅ボタン。数値ラベルを持たず、実寸の太さの横棒だけで示す。
+pub fn width_button(ui: &mut Ui, width_pt: f32, selected: bool) -> Response {
     let (rect, response) =
-        ui.allocate_exact_size(vec2(total_width, CONTROL_HEIGHT), button_sense());
+        ui.allocate_exact_size(vec2(WIDTH_BUTTON_WIDTH, CONTROL_HEIGHT), button_sense());
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
 
-    let base_fill = if selected {
-        SECONDARY_CONTAINER
-    } else {
-        SURFACE_CONTAINER_LOWEST
-    };
-    let fg = if selected {
-        ON_SECONDARY_CONTAINER
-    } else {
-        ON_SURFACE
-    };
-    let fill = if response.is_pointer_button_down_on() {
-        blend_state(base_fill, fg, 0.12)
-    } else if response.hovered() {
-        blend_state(base_fill, fg, 0.08)
-    } else {
-        base_fill
-    };
+    let fg = selection_fg(selected, response.hovered());
+    let fill = selection_fill(
+        selected,
+        response.hovered(),
+        response.is_pointer_button_down_on(),
+    );
 
-    let radius = pos.corner_radius();
     let painter = ui.painter();
-    painter.rect_filled(rect, radius, fill);
-    painter.rect_stroke(
-        rect,
-        radius,
-        Stroke::new(1.0, CONTROL_OUTLINE),
-        StrokeKind::Inside,
-    );
+    painter.rect_filled(rect, CornerRadius::same(BUTTON_RADIUS), fill);
 
-    // 実際の太さが直感でわかる横バーを描く
-    let bar_x = rect.min.x + WIDTH_PAD_X;
+    // 実際の太さが直感でわかる横棒を中央に置く。
     let bar_h = width_pt.clamp(2.0, 8.0);
-    let bar_rect = Rect::from_min_size(
-        pos2(bar_x, rect.center().y - bar_h * 0.5),
-        vec2(WIDTH_PREVIEW_WIDTH, bar_h),
-    );
+    let bar_rect = Rect::from_center_size(rect.center(), vec2(WIDTH_PREVIEW_LENGTH, bar_h));
     painter.rect_filled(
         bar_rect,
         CornerRadius::same((bar_h * 0.5).round() as u8),
         fg,
     );
 
-    paint_label(
-        painter,
-        bar_rect.max.x + ICON_GAP,
-        rect.center().y,
-        text_galley,
-        fg,
-    );
+    response
+}
+
+/// 枠線なしのフラットなアイコンボタン（元に戻す・やり直す・ペースト・コピー）。
+pub fn flat_icon_button(ui: &mut Ui, icon: ActionIcon, enabled: bool) -> Response {
+    let sense = if enabled {
+        button_sense()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(ICON_BUTTON_SIZE), sense);
+    if enabled && response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    let pressed = response.is_pointer_button_down_on();
+    let fg = if !enabled {
+        disabled_fg()
+    } else if response.hovered() || pressed {
+        ON_SURFACE
+    } else {
+        ON_SURFACE_VARIANT
+    };
+    let fill = if !enabled {
+        Color32::TRANSPARENT
+    } else if pressed {
+        blend_state(SURFACE_CONTAINER_HIGH, ON_SURFACE, 0.12)
+    } else if response.hovered() {
+        blend_state(SURFACE_CONTAINER_HIGH, ON_SURFACE, 0.08)
+    } else {
+        Color32::TRANSPARENT
+    };
+
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(BUTTON_RADIUS), fill);
+    let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(15.0));
+    draw_action_icon(painter, icon_rect, icon, fg);
+
+    response
+}
+
+/// 消去ボタン。通常は無彩色、ホバー時だけ Error 色に寄せる。
+pub fn clear_button(ui: &mut Ui, enabled: bool) -> Response {
+    let sense = if enabled {
+        button_sense()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(ICON_BUTTON_SIZE), sense);
+    if enabled && response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    let pressed = response.is_pointer_button_down_on();
+    let highlighted = enabled && (response.hovered() || pressed);
+    let fg = if !enabled {
+        disabled_fg()
+    } else if highlighted {
+        ERROR
+    } else {
+        ON_SURFACE_VARIANT
+    };
+    let fill = if !enabled {
+        Color32::TRANSPARENT
+    } else if pressed {
+        blend_state(SURFACE_CONTAINER_HIGH, ERROR, 0.12)
+    } else if response.hovered() {
+        blend_state(SURFACE_CONTAINER_HIGH, ERROR, 0.08)
+    } else {
+        Color32::TRANSPARENT
+    };
+
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(BUTTON_RADIUS), fill);
+    let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(15.0));
+    draw_action_icon(painter, icon_rect, ActionIcon::Clear, fg);
 
     response
 }
@@ -419,28 +484,29 @@ pub fn width_segment(ui: &mut Ui, width_pt: f32, selected: bool, pos: SegmentPos
 
 /// ウィンドウを閉じるボタン。枠なしウィンドウなので、閉じる操作をツールバー右端にも置く。
 pub fn close_button(ui: &mut Ui) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(CONTROL_HEIGHT), button_sense());
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(ICON_BUTTON_SIZE), button_sense());
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
 
-    let painter = ui.painter();
-    let radius = rect.width() * 0.5;
-    let fill = if response.is_pointer_button_down_on() {
-        blend_state(ERROR_CONTAINER, ERROR, 0.12)
+    let pressed = response.is_pointer_button_down_on();
+    let fill = if pressed {
+        blend_state(SURFACE_CONTAINER, ERROR, 0.12)
     } else if response.hovered() {
-        ERROR_CONTAINER
+        blend_state(SURFACE_CONTAINER, ERROR, 0.08)
     } else {
         Color32::TRANSPARENT
     };
-    painter.circle_filled(rect.center(), radius, fill);
 
     // 閉じる操作だと分かるよう、ホバー時だけ Error 色に寄せる。
-    let color = if response.hovered() {
+    let color = if response.hovered() || pressed {
         ERROR
     } else {
         ON_SURFACE_VARIANT
     };
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(BUTTON_RADIUS), fill);
+
     let stroke = Stroke::new(1.7, color);
     let half = 5.5;
     let center = rect.center();
@@ -517,147 +583,45 @@ pub enum ActionIcon {
     Paste,
 }
 
-#[derive(Clone, Copy)]
-pub enum ButtonVariant {
-    /// M3 Filled Button (Primary / OnPrimary) — 最重要アクション用
-    FilledPrimary,
-    /// M3 Filled Tonal Button (SecondaryContainer / OnSecondaryContainer) — 準主要アクション用
-    FilledTonal,
-    /// M3 Outlined Error Button — 破壊的アクション用
-    OutlinedError,
-}
-
-/// M3 の丸型 Outlined アイコンボタン（Undo / Redo 用）。
-pub fn icon_button(ui: &mut Ui, icon: ActionIcon, enabled: bool) -> Response {
-    let size = Vec2::splat(CONTROL_HEIGHT);
-    let sense = if enabled {
-        button_sense()
-    } else {
-        Sense::hover()
-    };
-    let (rect, response) = ui.allocate_exact_size(size, sense);
-    if enabled && response.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-
-    let painter = ui.painter();
-    let center = rect.center();
-    let radius = CONTROL_HEIGHT * 0.5 - 0.5;
-
-    let fg = if !enabled { disabled_fg() } else { ON_SURFACE };
-
-    let fill = if !enabled {
-        Color32::from_rgba_unmultiplied(0x1D, 0x1B, 0x20, 12)
-    } else if response.is_pointer_button_down_on() {
-        blend_state(SURFACE_CONTAINER_LOWEST, ON_SURFACE, 0.12)
-    } else if response.hovered() {
-        blend_state(SURFACE_CONTAINER_LOWEST, ON_SURFACE, 0.08)
-    } else {
-        SURFACE_CONTAINER_LOWEST
-    };
-    painter.circle_filled(center, radius, fill);
-
-    let border_color = if enabled {
-        CONTROL_OUTLINE
-    } else {
-        OUTLINE_VARIANT
-    };
-    painter.circle_stroke(center, radius, Stroke::new(1.0, border_color));
-
-    let icon_rect = Rect::from_center_size(center, Vec2::splat(15.0));
-    draw_action_icon(painter, icon_rect, icon, fg);
-
-    response
-}
-
-/// アイコン＋ラベル付きの M3 ピル型ボタン（Filled / Tonal / OutlinedError）。
-pub fn pill_button(
-    ui: &mut Ui,
-    icon: ActionIcon,
-    label: &str,
-    variant: ButtonVariant,
-    enabled: bool,
-) -> Response {
+/// 保存だけ残すテキスト付きの Filled ピルボタン。
+///
+/// ツールバーで文字を持つのはこのボタンだけで、ほかの操作はアイコンとツールチップで示す。
+pub fn save_button(ui: &mut Ui, label: &str) -> Response {
     let text_galley = label_galley(ui, label, PILL_LABEL_SIZE);
     let width = pill_button_width(ui, label);
 
-    let sense = if enabled {
-        button_sense()
-    } else {
-        Sense::hover()
-    };
-    let (rect, response) = ui.allocate_exact_size(vec2(width, CONTROL_HEIGHT), sense);
-    if enabled && response.hovered() {
+    let (rect, response) = ui.allocate_exact_size(vec2(width, CONTROL_HEIGHT), button_sense());
+    if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
 
-    let (base_fill, fg, border) = match (variant, enabled) {
-        (_, false) => (
-            Color32::from_rgba_unmultiplied(0x1D, 0x1B, 0x20, 20),
-            disabled_fg(),
-            Some(Stroke::new(1.0, OUTLINE_VARIANT)),
-        ),
-        (ButtonVariant::FilledPrimary, true) => (PRIMARY, ON_PRIMARY, None),
-        (ButtonVariant::FilledTonal, true) => (SECONDARY_CONTAINER, ON_SECONDARY_CONTAINER, None),
-        (ButtonVariant::OutlinedError, true) => {
-            let hover_fill = if response.hovered() || response.is_pointer_button_down_on() {
-                ERROR_CONTAINER
-            } else {
-                SURFACE_CONTAINER_LOWEST
-            };
-            let hover_fg = if response.hovered() || response.is_pointer_button_down_on() {
-                ON_ERROR_CONTAINER
-            } else {
-                ERROR
-            };
-            (hover_fill, hover_fg, Some(Stroke::new(1.0, ERROR)))
-        }
-    };
-
-    let fill = if enabled {
-        if response.is_pointer_button_down_on() {
-            blend_state(base_fill, fg, 0.14)
-        } else if response.hovered() {
-            blend_state(base_fill, fg, 0.08)
-        } else {
-            base_fill
-        }
+    let fill = if response.is_pointer_button_down_on() {
+        blend_state(PRIMARY, ON_PRIMARY, 0.14)
+    } else if response.hovered() {
+        blend_state(PRIMARY, ON_PRIMARY, 0.08)
     } else {
-        base_fill
+        PRIMARY
     };
 
     let radius = CornerRadius::same(PILL_RADIUS);
     let painter = ui.painter();
     painter.rect_filled(rect, radius, fill);
-    if let Some(stroke) = border {
-        painter.rect_stroke(rect, radius, stroke, StrokeKind::Inside);
-    }
 
     let icon_rect = Rect::from_center_size(
         pos2(rect.min.x + PILL_PAD_X + ICON_SIZE * 0.5, rect.center().y),
         Vec2::splat(ICON_SIZE),
     );
-    draw_action_icon(painter, icon_rect, icon, fg);
+    draw_action_icon(painter, icon_rect, ActionIcon::Save, ON_PRIMARY);
 
     paint_label(
         painter,
         icon_rect.max.x + ICON_GAP,
         rect.center().y,
         text_galley,
-        fg,
+        ON_PRIMARY,
     );
 
     response
-}
-
-/// ツールバーのセクション区切り縦線（M3 Divider: `OUTLINE_VARIANT`）。
-pub fn toolbar_divider(ui: &mut Ui) {
-    let (rect, _) = ui.allocate_exact_size(vec2(6.0, CONTROL_HEIGHT), Sense::hover());
-    let x = rect.center().x;
-    ui.painter().line_segment(
-        [pos2(x, rect.min.y + 6.0), pos2(x, rect.max.y - 6.0)],
-        Stroke::new(1.0, OUTLINE_VARIANT),
-    );
 }
 
 // ---- Vector Icons (Painter Primitives) -------------------------------------
@@ -905,21 +869,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn segment_pos_rounds_only_outer_edges() {
-        let first = SegmentPos::First.corner_radius();
-        assert_eq!(first.nw, PILL_RADIUS);
-        assert_eq!(first.sw, PILL_RADIUS);
-        assert_eq!(first.ne, 0);
-        assert_eq!(first.se, 0);
-
-        let mid = SegmentPos::Middle.corner_radius();
-        assert_eq!(mid, CornerRadius::ZERO);
-
-        let last = SegmentPos::Last.corner_radius();
-        assert_eq!(last.nw, 0);
-        assert_eq!(last.sw, 0);
-        assert_eq!(last.ne, PILL_RADIUS);
-        assert_eq!(last.se, PILL_RADIUS);
+    fn group_widths_match_the_fixed_button_layout() {
+        // ツール6 × 36 + 間隔2 × 5 + 左右余白4 × 2
+        assert_eq!(tools_group_width(), 234.0);
+        // 太さ3 × 36 + 間隔2 × 2 + 左右余白4 × 2
+        assert_eq!(widths_group_width(), 120.0);
+        // 履歴2 × 32 + 間隔2 + 左右余白4 × 2
+        assert_eq!(history_group_width(), 74.0);
+        // 消去1 × 32 + 左右余白4 × 2
+        assert_eq!(clear_group_width(), 40.0);
+        assert_eq!(ROW_HEIGHT, 36.0);
     }
 
     #[test]

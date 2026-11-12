@@ -1,11 +1,14 @@
 ---
-status: Accepted
+status: Superseded
 date: 2026-11-12
+superseded_by: 0016-ui-refresh.md
 ---
 
-> Decision 1 のうちコントロールの境界色だけを
-> [ADR 0014](0014-soften-control-outlines.md) で一段明るい `CONTROL_OUTLINE` に改訂した。
-> トークンの役割分担とその他の決定は引き続き有効。
+> ツールバーの構成（Decision 2〜4）は [ADR 0016](0016-ui-refresh.md) で
+> フルアイコン・ボーダレスに作り直した。カラートークン（Decision 1）と
+> `Painter` によるベクターアイコンは 0016 でも維持している。
+> コントロールの輪郭の改訂（[ADR 0014](0014-soften-control-outlines.md)）は
+> 0016 で廃止した。
 
 # Context
 
