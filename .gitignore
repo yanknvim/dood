@@ -1,0 +1,7 @@
+/target
+/.cargo-home
+
+# Nix
+/result
+/result-*
+/.direnv
