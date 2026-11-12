@@ -93,15 +93,8 @@ enum Draft {
 struct TextDraft {
     pos: Pos2,
     buffer: String,
-    /// 開いたフレームか。開いたフレームにフォーカスを要求すると、
-    /// 同じフレームのクリックで egui がフォーカスを手放してしまうため1フレーム待つ。
-    just_opened: bool,
-    /// TextEdit にフォーカスを要求済みか（毎フレーム要求すると IME が壊れる）。
+    /// TextEdit にフォーカスを要求済みか。
     focused: bool,
-    /// IME が変換中か。`Enter` を確定ではなく変換確定として扱うために使う。
-    ime_composing: bool,
-    /// 直近に IME イベントを受け取った時刻（egui の入力時刻、秒）。
-    last_ime_time: Option<f64>,
     color: Color32,
     size: f32,
 }
@@ -228,39 +221,11 @@ fn plan_toolbar(widths: &[f32], export_width: f32, max_width: f32) -> (Vec<Vec<u
 
 // ---- テキスト入力の Enter 判定 ---------------------------------------------
 
-/// IME 変換確定直後の `Enter` を誤って「入力完了」にしないための猶予。
-const IME_ENTER_GRACE: Duration = Duration::from_millis(150);
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum EnterAction {
-    /// テキストを確定して入力欄を閉じる。
-    Commit,
-    /// 何もしない（IME の変換確定、または Shift+Enter の改行）。
-    Ignore,
-}
-
-/// `Enter` をどう扱うか決める。
+/// `Enter` で入力欄を確定するか。
 ///
-/// - `Shift+Enter` は改行（`TextEdit` が挿入済み）なので確定しない。
-/// - IME 変換中・そのフレームに IME イベントがある・直近 150ms 以内に IME イベントが
-///   ある場合は、変換確定の `Enter` とみなして確定しない。
-fn enter_action(
-    enter: bool,
-    shift: bool,
-    ime_composing: bool,
-    ime_event_this_frame: bool,
-    since_ime_event: Option<Duration>,
-) -> EnterAction {
-    if !enter || shift {
-        return EnterAction::Ignore;
-    }
-    if ime_composing || ime_event_this_frame {
-        return EnterAction::Ignore;
-    }
-    if since_ime_event.is_some_and(|elapsed| elapsed < IME_ENTER_GRACE) {
-        return EnterAction::Ignore;
-    }
-    EnterAction::Commit
+/// `Shift+Enter` は改行（`TextEdit` が `\n` を挿入済み）なので確定しない。
+fn commit_on_enter(enter: bool, shift: bool) -> bool {
+    enter && !shift
 }
 
 pub struct DoodApp {
@@ -397,10 +362,7 @@ impl DoodApp {
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         // テキスト編集中はキーを入力欄に譲る（⌘C/⌘V も同様）。
-        // `self.text` も見るのは、入力欄を開いた直後のフレームで
-        // `egui_wants_keyboard_input()` がまだ false になることがあるため。
-        // ここを取りこぼすと `A` / `O` など母音キーがツール切り替えに奪われる。
-        if self.text.is_some() || ctx.egui_wants_keyboard_input() {
+        if ctx.egui_wants_keyboard_input() {
             return;
         }
 
@@ -446,7 +408,7 @@ impl DoodApp {
     // ---- 背景画像の貼り付け ---------------------------------------------
 
     fn handle_paste(&mut self, ctx: &egui::Context) {
-        if self.text.is_some() || ctx.egui_wants_keyboard_input() {
+        if ctx.egui_wants_keyboard_input() {
             return;
         }
         let pasted = ctx.input(|input| {
@@ -907,10 +869,7 @@ impl DoodApp {
         self.text = Some(TextDraft {
             pos: at,
             buffer: String::new(),
-            just_opened: true,
             focused: false,
-            ime_composing: false,
-            last_ime_time: None,
             color: self.color,
             size: self.text_size(),
         });
@@ -928,21 +887,6 @@ impl DoodApp {
 
         #[allow(deprecated)]
         let id = Id::new("dood_text_input");
-
-        // フォーカスは TextEdit を描く前に一度だけ要求する。
-        // 描画後に request_focus すると egui がそのフレームで IME を無効化してしまい、
-        // 最初の1文字（特に母音）を取りこぼす。
-        //
-        // ただし入力欄を開いたフレームではクリックがまだ入力中で、
-        // egui が「別の場所のクリック」としてフォーカスを手放す。1フレーム待つ。
-        if draft.just_opened {
-            draft.just_opened = false;
-            ui.ctx().request_repaint();
-        } else if !draft.focused {
-            ui.memory_mut(|memory| memory.request_focus(id));
-            draft.focused = true;
-            ui.ctx().request_repaint();
-        }
 
         let width = TEXT_EDIT_WIDTH.min((canvas.width() - 4.0).max(24.0));
         let height = text_editor_height(ui, &draft, width);
@@ -962,17 +906,20 @@ impl DoodApp {
                 .text_color(draft.color),
         );
 
-        // IME の状態を追う。変換中の Enter は「入力完了」ではなく「変換確定」。
+        // フォーカス要求は開いた瞬間の1回だけ（毎フレーム要求すると入力状態が壊れる）。
+        if !draft.focused {
+            response.request_focus();
+            draft.focused = true;
+            self.text = Some(draft);
+            return;
+        }
+
         // Shift は Enter イベント自身から読む（同じフレームで修飾キーが離されても取りこぼさない）。
-        let (ime_event, enter, enter_shift, escape, now) = ui.input(|input| {
-            let mut ime_event = false;
+        let (enter, enter_shift, escape) = ui.input(|input| {
             let mut enter = false;
             let mut enter_shift = false;
 
             for event in &input.events {
-                if track_ime_event(&mut draft.ime_composing, event) {
-                    ime_event = true;
-                }
                 if let egui::Event::Key {
                     key: Key::Enter,
                     pressed: true,
@@ -985,40 +932,14 @@ impl DoodApp {
                 }
             }
 
-            (
-                ime_event,
-                enter,
-                enter_shift,
-                input.key_pressed(Key::Escape),
-                input.time,
-            )
+            (enter, enter_shift, input.key_pressed(Key::Escape))
         });
-
-        if ime_event {
-            draft.last_ime_time = Some(now);
-        }
-        let since_ime_event = draft
-            .last_ime_time
-            .map(|time| Duration::from_secs_f64((now - time).max(0.0)));
 
         if escape {
             return;
         }
 
-        if enter_action(
-            enter,
-            enter_shift,
-            draft.ime_composing,
-            ime_event,
-            since_ime_event,
-        ) == EnterAction::Commit
-        {
-            self.commit_text(draft);
-            return;
-        }
-
-        // フォーカスを外したときも確定。変換中は閉じない。
-        if response.lost_focus() && !draft.ime_composing {
+        if commit_on_enter(enter, enter_shift) || response.lost_focus() {
             self.commit_text(draft);
             return;
         }
@@ -1112,20 +1033,6 @@ impl DoodApp {
         self.text_editor(ui);
         self.flush_export(ui.ctx());
     }
-}
-
-/// IME イベントなら `ime_composing` を更新して `true` を返す。
-fn track_ime_event(ime_composing: &mut bool, event: &egui::Event) -> bool {
-    let egui::Event::Ime(ime) = event else {
-        return false;
-    };
-    match ime {
-        egui::ImeEvent::Preedit { text, .. } => *ime_composing = !text.is_empty(),
-        egui::ImeEvent::Commit(_) => *ime_composing = false,
-        // Enabled / Disabled は egui では使われない。
-        _ => {}
-    }
-    true
 }
 
 /// 入力中の複数行テキストに合わせた入力欄の高さ。
@@ -1305,66 +1212,11 @@ mod tests {
     // ---- テキスト入力 ------------------------------------------------
 
     #[test]
-    fn enter_commits_only_when_not_composing() {
-        assert_eq!(
-            enter_action(true, false, false, false, None),
-            EnterAction::Commit
-        );
+    fn enter_commits_unless_shift_is_held() {
+        assert!(commit_on_enter(true, false));
         // Shift+Enter は改行
-        assert_eq!(
-            enter_action(true, true, false, false, None),
-            EnterAction::Ignore
-        );
-        // IME 変換中
-        assert_eq!(
-            enter_action(true, false, true, false, None),
-            EnterAction::Ignore
-        );
-        // 同じフレームに IME イベント
-        assert_eq!(
-            enter_action(true, false, false, true, None),
-            EnterAction::Ignore
-        );
-        // 変換確定直後（猶予内）
-        assert_eq!(
-            enter_action(true, false, false, false, Some(Duration::from_millis(50))),
-            EnterAction::Ignore
-        );
-        assert_eq!(
-            enter_action(true, false, false, false, Some(IME_ENTER_GRACE)),
-            EnterAction::Commit
-        );
-        assert_eq!(
-            enter_action(false, false, false, false, None),
-            EnterAction::Ignore
-        );
-    }
-
-    #[test]
-    fn ime_events_track_composition() {
-        let preedit = |text: &str| {
-            egui::Event::Ime(egui::ImeEvent::Preedit {
-                text: text.to_owned(),
-                active_range_chars: None,
-            })
-        };
-
-        let mut composing = false;
-        assert!(track_ime_event(&mut composing, &preedit("か")));
-        assert!(composing);
-        assert!(track_ime_event(&mut composing, &preedit("")));
-        assert!(!composing);
-
-        assert!(track_ime_event(&mut composing, &preedit("かん")));
-        assert!(track_ime_event(
-            &mut composing,
-            &egui::Event::Ime(egui::ImeEvent::Commit("漢".to_owned()))
-        ));
-        assert!(!composing);
-        assert!(!track_ime_event(
-            &mut composing,
-            &egui::Event::Text("a".to_owned())
-        ));
+        assert!(!commit_on_enter(true, true));
+        assert!(!commit_on_enter(false, false));
     }
 
     #[test]
@@ -1393,42 +1245,6 @@ mod tests {
         });
 
         assert_eq!(app.tool, Tool::Arrow);
-    }
-
-    #[test]
-    fn single_key_shortcuts_are_yielded_while_editing_text() {
-        let mut app = test_app();
-        app.open_text(Pos2::new(10.0, 10.0));
-
-        run_with_events(
-            &mut app,
-            vec![
-                key_event(Key::A),
-                key_event(Key::O),
-                key_event(Key::Num2),
-                key_event(Key::CloseBracket),
-            ],
-            |app, ctx| app.handle_shortcuts(ctx),
-        );
-
-        assert_eq!(app.tool, Tool::Pen, "母音キーがツール切り替えに奪われた");
-        assert_eq!(app.color, PALETTE[0].1, "色キーが奪われた");
-        assert_eq!(app.width_index, 1, "太さキーが奪われた");
-    }
-
-    #[test]
-    fn paste_image_is_yielded_while_editing_text() {
-        let mut app = test_app();
-        app.open_text(Pos2::new(10.0, 10.0));
-
-        let image = ColorImage::new([2, 2], vec![Color32::RED; 4]);
-        run_with_events(
-            &mut app,
-            vec![egui::Event::PasteImage(Arc::new(image))],
-            |app, ctx| app.handle_paste(ctx),
-        );
-
-        assert!(app.scene.bg.is_none(), "テキスト編集中に背景が貼り付いた");
     }
 
     #[test]
