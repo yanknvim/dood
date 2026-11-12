@@ -48,6 +48,14 @@ pub const SURFACE_CONTAINER_HIGHEST: Color32 = Color32::from_rgb(0xE6, 0xE0, 0xE
 pub const OUTLINE: Color32 = Color32::from_rgb(0x79, 0x74, 0x7E);
 pub const OUTLINE_VARIANT: Color32 = Color32::from_rgb(0xCA, 0xC4, 0xD0);
 
+/// コントロール（セグメントボタン・丸型アイコンボタンなど）の輪郭。
+///
+/// M3 Baseline の `outline` (#79747E) は白背景に対して 4.5:1 あり、ツールバーで
+/// 1pt の輪郭が長く連なると重く見える。背景の `surfaceContainer` (#F3EDF7) と
+/// 同じ紫寄りの色相まで寄せ、境界と分かる範囲で明るくした値を使う
+/// （白背景で約2.1:1）。面の分割線・キャンバス外周は `OUTLINE_VARIANT` のまま。
+pub const CONTROL_OUTLINE: Color32 = Color32::from_rgb(0xBC, 0xAE, 0xC7);
+
 /// ツールバー内の標準コントロール高さ（M3 Compact Density: 32pt）。
 pub const CONTROL_HEIGHT: f32 = 32.0;
 pub const PILL_RADIUS: u8 = 16;
@@ -308,7 +316,12 @@ pub fn tool_segment(ui: &mut Ui, tool: Tool, selected: bool, pos: SegmentPos) ->
     let radius = pos.corner_radius();
     let painter = ui.painter();
     painter.rect_filled(rect, radius, fill);
-    painter.rect_stroke(rect, radius, Stroke::new(1.0, OUTLINE), StrokeKind::Inside);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, CONTROL_OUTLINE),
+        StrokeKind::Inside,
+    );
 
     let icon_rect = Rect::from_center_size(
         pos2(
@@ -363,7 +376,12 @@ pub fn width_segment(ui: &mut Ui, width_pt: f32, selected: bool, pos: SegmentPos
     let radius = pos.corner_radius();
     let painter = ui.painter();
     painter.rect_filled(rect, radius, fill);
-    painter.rect_stroke(rect, radius, Stroke::new(1.0, OUTLINE), StrokeKind::Inside);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, CONTROL_OUTLINE),
+        StrokeKind::Inside,
+    );
 
     // 実際の太さが直感でわかる横バーを描く
     let bar_x = rect.min.x + WIDTH_PAD_X;
@@ -418,7 +436,7 @@ pub fn color_swatch(ui: &mut Ui, color: Color32, selected: bool) -> Response {
     // 白色スウォッチでも背景に埋もれないよう枠線を入れる
     let is_light = is_light_color(color);
     let border_color = if is_light {
-        OUTLINE
+        CONTROL_OUTLINE
     } else {
         Color32::from_rgba_unmultiplied(0, 0, 0, 40)
     };
@@ -490,7 +508,11 @@ pub fn icon_button(ui: &mut Ui, icon: ActionIcon, enabled: bool) -> Response {
     };
     painter.circle_filled(center, radius, fill);
 
-    let border_color = if enabled { OUTLINE } else { OUTLINE_VARIANT };
+    let border_color = if enabled {
+        CONTROL_OUTLINE
+    } else {
+        OUTLINE_VARIANT
+    };
     painter.circle_stroke(center, radius, Stroke::new(1.0, border_color));
 
     let icon_rect = Rect::from_center_size(center, Vec2::splat(15.0));

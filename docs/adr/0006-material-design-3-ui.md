@@ -3,6 +3,10 @@ status: Accepted
 date: 2026-11-12
 ---
 
+> Decision 1 のうちコントロールの境界色だけを
+> [ADR 0014](0014-soften-control-outlines.md) で一段明るい `CONTROL_OUTLINE` に改訂した。
+> トークンの役割分担とその他の決定は引き続き有効。
+
 # Context
 
 初期実装のツールバーは egui 既定の `selectable_label`・`Button`・18pt 角の色見本を横一列に並べただけで、次の課題があった。
