@@ -27,10 +27,12 @@ pub enum ExportKind {
     Save,
 }
 
-/// ツールバー下のステータス表示。一定時間で自動的に消える。
+/// 画面右上に一時表示する通知。一定時間で自動的に消える。
 #[derive(Clone, Default)]
 pub struct Status {
     pub text: String,
+    /// 保存先など、本文に添える補足。本文より小さく折り返して出す。
+    pub detail: Option<String>,
     pub error: bool,
     pub expires_at: Option<Instant>,
 }
@@ -43,7 +45,19 @@ impl Status {
 
     /// メッセージを設定し、表示期限を `now` から数える。
     pub fn set(&mut self, text: impl Into<String>, error: bool, now: Instant) {
+        self.set_with_detail(text, None, error, now);
+    }
+
+    /// 補足付きのメッセージを設定し、表示期限を `now` から数える。
+    pub fn set_with_detail(
+        &mut self,
+        text: impl Into<String>,
+        detail: Option<String>,
+        error: bool,
+        now: Instant,
+    ) {
         self.text = text.into();
+        self.detail = detail;
         self.error = error;
         let ttl = if error {
             Self::ERROR_TTL
@@ -73,14 +87,20 @@ impl Status {
 
     pub fn clear(&mut self) {
         self.text.clear();
+        self.detail = None;
         self.error = false;
         self.expires_at = None;
     }
 }
 
-fn set_shared(status: &Arc<Mutex<Status>>, text: impl Into<String>, error: bool) {
+fn set_shared(
+    status: &Arc<Mutex<Status>>,
+    text: impl Into<String>,
+    detail: Option<String>,
+    error: bool,
+) {
     if let Ok(mut guard) = status.lock() {
-        guard.set(text, error, Instant::now());
+        guard.set_with_detail(text, detail, error, Instant::now());
     }
 }
 
@@ -148,7 +168,22 @@ const TOOLBAR_ROW_GAP: f32 = 4.0;
 const GROUP_SEPARATOR: f32 = TOOLBAR_GAP * 2.0 + 6.0;
 /// 書き出しボタンと左側グループの最小間隔。
 const EXPORT_GAP: f32 = 12.0;
-const STATUS_HEIGHT: f32 = 15.0;
+
+// ---- 通知（トースト） -------------------------------------------------------
+
+/// キャンバス右上からの余白。ツールバーの下に置き、バーには重ねない。
+const TOAST_MARGIN: f32 = 12.0;
+/// 通知の最大幅。長い保存先は折り返す。
+const TOAST_MAX_WIDTH: f32 = 420.0;
+/// 通知の最小幅。短いメッセージでもカードとして見えるようにする。
+const TOAST_MIN_WIDTH: f32 = 180.0;
+const TOAST_RADIUS: u8 = 10;
+const TOAST_ICON_SIZE: f32 = 16.0;
+const TOAST_ICON_GAP: f32 = 8.0;
+const TOAST_PAD_X: f32 = 14.0;
+const TOAST_PAD_Y: f32 = 10.0;
+const TOAST_HEADLINE_SIZE: f32 = 12.5;
+const TOAST_DETAIL_SIZE: f32 = 11.0;
 
 const PALETTE_MARGIN_X: i8 = 5;
 const PALETTE_MARGIN_Y: i8 = 4;
@@ -219,6 +254,20 @@ fn plan_toolbar(widths: &[f32], export_width: f32, max_width: f32) -> (Vec<Vec<u
     }
 }
 
+// ---- 通知の配置 -------------------------------------------------------------
+
+/// 通知の右上アンカー。キャンバス右上の内側に置き、ツールバーには重ねない。
+fn toast_anchor(canvas: Rect) -> Pos2 {
+    Pos2::new(canvas.max.x - TOAST_MARGIN, canvas.min.y + TOAST_MARGIN)
+}
+
+/// 通知が写り込まないよう、撮影を次のフレームへ送るべきか。
+///
+/// 通知が無ければその場で撮る。通知があれば、通知を描かない次のフレームまで待つ。
+fn should_defer_capture(capture_next_frame: bool, notification_visible: bool) -> bool {
+    !capture_next_frame && notification_visible
+}
+
 // ---- テキスト入力の Enter 判定 ---------------------------------------------
 
 /// `Enter` で入力欄を確定するか。
@@ -240,6 +289,8 @@ pub struct DoodApp {
     status: Arc<Mutex<Status>>,
     busy: Arc<AtomicBool>,
     pending_export: Option<ExportKind>,
+    /// 通知が写り込まないよう、次のフレームで通知を描かずに撮影する。
+    capture_next_frame: bool,
     always_on_top: bool,
     canvas_rect: Rect,
 }
@@ -266,6 +317,7 @@ impl DoodApp {
             status: Arc::new(Mutex::new(Status::default())),
             busy: Arc::new(AtomicBool::new(false)),
             pending_export: None,
+            capture_next_frame: false,
             always_on_top: true,
             canvas_rect: Rect::NOTHING,
         }
@@ -301,7 +353,11 @@ impl DoodApp {
     }
 
     fn set_status(&self, text: impl Into<String>, error: bool) {
-        set_shared(&self.status, text, error);
+        set_shared(&self.status, text, None, error);
+    }
+
+    fn set_status_with_detail(&self, text: impl Into<String>, detail: String, error: bool) {
+        set_shared(&self.status, text, Some(detail), error);
     }
 
     fn apply(&mut self, action: Action) {
@@ -402,6 +458,15 @@ impl DoodApp {
                 egui::WindowLevel::Normal
             };
             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+            // ツールバーに状態表示が無いので、切り替えは通知で知らせる。
+            self.set_status(
+                if self.always_on_top {
+                    "最前面表示: オン"
+                } else {
+                    "最前面表示: オフ"
+                },
+                false,
+            );
         }
     }
 
@@ -448,14 +513,16 @@ impl DoodApp {
             if target.x > available.x || target.y > available.y {
                 let scale = (available.x / target.x).min(available.y / target.y);
                 target *= scale;
-                note = "（画面に収まらないため縮小表示）".to_owned();
+                note = "画面に収まらないため縮小表示".to_owned();
             }
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(target));
-        self.set_status(
-            format!("背景を貼り付けました {}×{}px{note}", size_px[0], size_px[1]),
-            false,
-        );
+        let text = format!("背景を貼り付けました {}×{}px", size_px[0], size_px[1]);
+        if note.is_empty() {
+            self.set_status(text, false);
+        } else {
+            self.set_status_with_detail(text, note, false);
+        }
     }
 
     // ---- ツールバー (Material Design 3 Docked Toolbar) ------------------
@@ -503,8 +570,6 @@ impl DoodApp {
             [bar_rect.left_bottom(), bar_rect.right_bottom()],
             Stroke::new(1.0, theme::OUTLINE_VARIANT),
         );
-
-        self.status_bar(ui);
 
         for action in actions {
             self.apply(action);
@@ -670,45 +735,142 @@ impl DoodApp {
         }
     }
 
-    /// ツールバー下のステータスバー。メッセージが無いときは保存先を出す。
-    fn status_bar(&mut self, ui: &mut egui::Ui) {
+    /// 画面右上（ツールバーの下）に通知を一時表示する。
+    fn notification(&mut self, ctx: &egui::Context, canvas: Rect) {
+        // 書き出しのスクリーンショットに通知を写り込ませない。
+        if self.capture_next_frame {
+            return;
+        }
+
         let now = Instant::now();
-        let (text, error, remaining) = {
-            let mut status = self
-                .status
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let visible = status
-                .visible(now)
-                .map(|(text, error)| (text.to_owned(), error));
-            let remaining = status.time_until_expiry(now);
-            match visible {
-                Some((text, error)) => (text, error, remaining),
-                None => (format!("保存先: {}", self.out_path.display()), false, None),
-            }
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some((text, error)) = status
+            .visible(now)
+            .map(|(text, error)| (text.to_owned(), error))
+        else {
+            return;
         };
+        let detail = status.detail.clone();
+        let remaining = status.time_until_expiry(now);
+        drop(status);
 
         // マウスを動かさなくても表示期限で消えるように再描画を予約する。
         if let Some(remaining) = remaining {
-            ui.ctx().request_repaint_after(remaining);
+            ctx.request_repaint_after(remaining);
         }
 
-        let (fill, color) = if error {
-            (theme::ERROR_CONTAINER, theme::ERROR)
+        let max_width = TOAST_MAX_WIDTH.min(canvas.width() - TOAST_MARGIN * 2.0);
+        if max_width < TOAST_MIN_WIDTH {
+            return;
+        }
+
+        let (fill, fg, detail_fg, accent) = if error {
+            (
+                theme::ERROR,
+                theme::ON_ERROR,
+                theme::ON_ERROR.gamma_multiply(0.85),
+                theme::ON_ERROR,
+            )
         } else {
-            (theme::SURFACE_CONTAINER_LOW, theme::ON_SURFACE_VARIANT)
+            (
+                theme::INVERSE_SURFACE,
+                theme::INVERSE_ON_SURFACE,
+                theme::INVERSE_ON_SURFACE.gamma_multiply(0.8),
+                theme::INVERSE_PRIMARY,
+            )
         };
-        egui::Frame::new()
-            .fill(fill)
-            .inner_margin(egui::Margin::symmetric(12, 3))
-            .show(ui, |ui| {
-                ui.set_min_height(STATUS_HEIGHT);
-                ui.add(
-                    egui::Label::new(egui::RichText::new(text.as_str()).size(11.5).color(color))
-                        .truncate(),
-                )
-                .on_hover_text(text);
+
+        egui::Area::new(Id::unique("dood_notification"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(toast_anchor(canvas))
+            .pivot(egui::Align2::RIGHT_TOP)
+            // キャンバスへのクリックは通知を貫通させる。
+            .interactable(false)
+            .default_width(max_width)
+            .show(ctx, |ui| {
+                // 幅は文字の実寸から決める。Area の前回サイズに左右されず、
+                // 長い保存先だけが折り返される。
+                let headline = ui.painter().layout_no_wrap(
+                    text.clone(),
+                    egui::FontId::proportional(TOAST_HEADLINE_SIZE),
+                    fg,
+                );
+                let detail_galley = detail.as_ref().map(|detail| {
+                    ui.painter().layout_no_wrap(
+                        detail.clone(),
+                        egui::FontId::proportional(TOAST_DETAIL_SIZE),
+                        detail_fg,
+                    )
+                });
+                let text_max =
+                    (max_width - TOAST_PAD_X * 2.0 - TOAST_ICON_SIZE - TOAST_ICON_GAP).max(40.0);
+                let text_width = headline
+                    .size()
+                    .x
+                    .max(detail_galley.as_ref().map_or(0.0, |galley| galley.size().x))
+                    .min(text_max);
+                let content_width = (text_width + TOAST_ICON_SIZE + TOAST_ICON_GAP)
+                    .max(TOAST_MIN_WIDTH - TOAST_PAD_X * 2.0);
+
+                egui::Frame::new()
+                    .fill(fill)
+                    .corner_radius(egui::CornerRadius::same(TOAST_RADIUS))
+                    .inner_margin(egui::Margin::symmetric(
+                        TOAST_PAD_X as i8,
+                        TOAST_PAD_Y as i8,
+                    ))
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 3],
+                        blur: 10,
+                        spread: 0,
+                        color: Color32::from_black_alpha(36),
+                    })
+                    .show(ui, |ui| {
+                        ui.set_width(content_width);
+                        ui.horizontal_top(|ui| {
+                            // 幅の計算どおりにアイコンと本文を並べる（既定の item_spacing を足さない）。
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            let (icon_rect, _) = ui
+                                .allocate_exact_size(Vec2::splat(TOAST_ICON_SIZE), Sense::hover());
+                            theme::draw_notification_icon(ui.painter(), icon_rect, error, accent);
+                            ui.add_space(TOAST_ICON_GAP);
+                            ui.vertical(|ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(text.as_str())
+                                            .size(TOAST_HEADLINE_SIZE)
+                                            .color(fg),
+                                    )
+                                    .wrap(),
+                                );
+                                if let Some(detail) = &detail {
+                                    ui.add_space(2.0);
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(detail.as_str())
+                                                .size(TOAST_DETAIL_SIZE)
+                                                .color(detail_fg),
+                                        )
+                                        .wrap(),
+                                    );
+                                }
+                            });
+                        });
+                    });
             });
+    }
+
+    /// 通知が表示中か。期限切れならここで消す。
+    fn notification_visible(&mut self) -> bool {
+        let now = Instant::now();
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        status.visible(now).is_some()
     }
 
     // ---- キャンバス -----------------------------------------------------
@@ -965,16 +1127,28 @@ impl DoodApp {
 
     fn flush_export(&mut self, ctx: &egui::Context) {
         let Some(kind) = self.pending_export.take() else {
+            self.capture_next_frame = false;
             return;
         };
         if self.busy.load(Ordering::SeqCst) {
+            self.capture_next_frame = false;
             self.pending_export = Some(kind);
             return;
         }
         if !self.canvas_rect.is_positive() {
+            self.capture_next_frame = false;
             self.set_status("キャンバスがまだ描画されていません", true);
             return;
         }
+
+        // 表示中の通知が出力 PNG に写り込まないよう、通知を描かない次のフレームで撮る。
+        if should_defer_capture(self.capture_next_frame, self.notification_visible()) {
+            self.capture_next_frame = true;
+            self.pending_export = Some(kind);
+            ctx.request_repaint();
+            return;
+        }
+        self.capture_next_frame = false;
 
         // キャンバスの枠線（1pt 内側に描いている）を写さないよう 1pt 内側を切り出す。
         let rect = self.canvas_rect.shrink(1.0);
@@ -996,6 +1170,7 @@ impl DoodApp {
                             set_shared(
                                 &status,
                                 format!("コピーしました（{width}×{height}px）"),
+                                None,
                                 false,
                             );
                         }
@@ -1004,18 +1179,21 @@ impl DoodApp {
                                 ctx.copy_text(path.display().to_string());
                                 set_shared(
                                     &status,
-                                    format!(
-                                        "保存しました（{width}×{height}px）: {}",
-                                        path.display()
-                                    ),
+                                    format!("保存しました（{width}×{height}px）"),
+                                    Some(path.display().to_string()),
                                     false,
                                 );
                             }
-                            Err(error) => set_shared(&status, error, true),
+                            Err(error) => set_shared(
+                                &status,
+                                error,
+                                Some(format!("保存先: {}", path.display())),
+                                true,
+                            ),
                         },
                     }
                 }
-                Err(error) => set_shared(&status, error, true),
+                Err(error) => set_shared(&status, error, None, true),
             }
             busy.store(false, Ordering::SeqCst);
             ctx.request_repaint();
@@ -1031,6 +1209,7 @@ impl DoodApp {
         let area = ui.available_rect_before_wrap();
         self.canvas(ui, area);
         self.text_editor(ui);
+        self.notification(ui.ctx(), area);
         self.flush_export(ui.ctx());
     }
 }
@@ -1095,6 +1274,7 @@ mod tests {
             status: Arc::new(Mutex::new(Status::default())),
             busy: Arc::new(AtomicBool::new(false)),
             pending_export: None,
+            capture_next_frame: false,
             always_on_top: true,
             canvas_rect: Rect::NOTHING,
         }
@@ -1165,6 +1345,43 @@ mod tests {
             status.time_until_expiry(start + Duration::from_secs(1)),
             Some(Status::SUCCESS_TTL - Duration::from_secs(1)),
         );
+    }
+
+    #[test]
+    fn status_detail_is_shown_and_cleared_with_the_message() {
+        let mut status = Status::default();
+        let start = Instant::now();
+        status.set_with_detail(
+            "保存しました",
+            Some("/tmp/dood.png".to_owned()),
+            false,
+            start,
+        );
+
+        assert_eq!(status.detail.as_deref(), Some("/tmp/dood.png"));
+        assert!(status.visible(start).is_some());
+        assert!(status.visible(start + Status::SUCCESS_TTL).is_none());
+        assert_eq!(status.detail, None);
+    }
+
+    // ---- 通知の配置 ---------------------------------------------------
+
+    #[test]
+    fn toast_sits_at_the_top_right_below_the_toolbar() {
+        let canvas = Rect::from_min_size(Pos2::new(0.0, 60.0), Vec2::new(480.0, 300.0));
+        let anchor = toast_anchor(canvas);
+
+        assert_eq!(anchor, Pos2::new(480.0 - TOAST_MARGIN, 60.0 + TOAST_MARGIN));
+        assert!(anchor.x > canvas.center().x);
+        assert!(anchor.y >= canvas.min.y, "ツールバーに重なる");
+    }
+
+    #[test]
+    fn capture_waits_for_a_frame_without_the_notification() {
+        assert!(should_defer_capture(false, true));
+        assert!(!should_defer_capture(false, false));
+        // すでに通知を隠したフレームなら、そのまま撮る。
+        assert!(!should_defer_capture(true, true));
     }
 
     // ---- ツールバーの折り返し ----------------------------------------

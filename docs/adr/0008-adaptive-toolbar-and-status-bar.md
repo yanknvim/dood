@@ -1,7 +1,12 @@
 ---
-status: Accepted
+status: Superseded
 date: 2026-11-12
+superseded_by: 0009-transient-notifications-instead-of-status-bar.md
 ---
+
+> ステータスバーの常設（Decision 2）は
+> [ADR 0009](0009-transient-notifications-instead-of-status-bar.md) で置き換えた。
+> ツールバーの折り返し（Decision 1）は引き続き有効。
 
 # Context
 

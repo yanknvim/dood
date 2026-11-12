@@ -26,8 +26,13 @@ pub const SECONDARY_CONTAINER: Color32 = Color32::from_rgb(0xE8, 0xDE, 0xF8);
 pub const ON_SECONDARY_CONTAINER: Color32 = Color32::from_rgb(0x1D, 0x19, 0x2B);
 
 pub const ERROR: Color32 = Color32::from_rgb(0xB3, 0x26, 0x1E);
+pub const ON_ERROR: Color32 = Color32::from_rgb(0xFF, 0xFF, 0xFF);
 pub const ERROR_CONTAINER: Color32 = Color32::from_rgb(0xF9, 0xDE, 0xDC);
 pub const ON_ERROR_CONTAINER: Color32 = Color32::from_rgb(0x41, 0x0E, 0x0B);
+
+pub const INVERSE_SURFACE: Color32 = Color32::from_rgb(0x32, 0x2F, 0x35);
+pub const INVERSE_ON_SURFACE: Color32 = Color32::from_rgb(0xF5, 0xEF, 0xF7);
+pub const INVERSE_PRIMARY: Color32 = Color32::from_rgb(0xD0, 0xBC, 0xFF);
 
 pub const SURFACE: Color32 = Color32::from_rgb(0xFE, 0xF7, 0xFF);
 pub const ON_SURFACE: Color32 = Color32::from_rgb(0x1D, 0x1B, 0x20);
@@ -738,6 +743,24 @@ pub fn draw_check_icon(painter: &Painter, center: Pos2, size: f32, color: Color3
     let p2 = pos2(center.x - size * 0.2, center.y + size * 0.7);
     let p3 = pos2(center.x + size * 0.9, center.y - size * 0.65);
     painter.add(Shape::line(vec![p1, p2, p3], Stroke::new(1.8, color)));
+}
+
+/// 通知（トースト）の先頭に置くアイコン。成功はチェック、エラーは感嘆符。
+pub fn draw_notification_icon(painter: &Painter, rect: Rect, error: bool, color: Color32) {
+    if error {
+        let center = rect.center();
+        painter.circle_stroke(center, 6.5, Stroke::new(1.6, color));
+        painter.line_segment(
+            [
+                pos2(center.x, center.y - 3.2),
+                pos2(center.x, center.y + 1.2),
+            ],
+            Stroke::new(1.8, color),
+        );
+        painter.circle_filled(pos2(center.x, center.y + 3.8), 1.1, color);
+    } else {
+        draw_check_icon(painter, rect.center(), 4.6, color);
+    }
 }
 
 #[cfg(test)]
