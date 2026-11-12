@@ -1,7 +1,7 @@
 //! アプリ本体：状態・入力・ツールバー・書き出しの調停。
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -106,17 +106,30 @@ fn set_shared(
 
 /// ドラッグ中の下書き。確定前なので `Scene` には入れない。
 enum Draft {
-    Freehand { points: Vec<Pos2> },
-    Shape { start: Pos2, current: Pos2 },
+    Freehand {
+        points: Vec<Pos2>,
+    },
+    Shape {
+        start: Pos2,
+        current: Pos2,
+    },
+    /// テキストツールのドラッグで指定中のテキストボックス。
+    TextBox {
+        start: Pos2,
+        current: Pos2,
+    },
 }
 
 struct TextDraft {
-    pos: Pos2,
+    /// 入力欄の矩形（キャンバス左上を原点とする pt）。
+    rect: Rect,
     buffer: String,
     /// TextEdit にフォーカスを要求済みか。
     focused: bool,
     color: Color32,
     size: f32,
+    /// ドラッグで指定した固定サイズか。クリックで開いた場合は内容に合わせて縦に伸びる。
+    fixed_box: bool,
 }
 
 enum Action {
@@ -127,12 +140,14 @@ enum Action {
     Redo,
     Clear,
     Export(ExportKind),
+    PasteImage,
 }
 
 #[derive(Default)]
 struct Pressed {
     copy: bool,
     save: bool,
+    paste_image: bool,
     undo: bool,
     redo: bool,
     clear: bool,
@@ -192,6 +207,9 @@ const PALETTE_GAP: f32 = 2.0;
 const TEXT_EDIT_WIDTH: f32 = 260.0;
 const TEXT_EDIT_PADDING: f32 = 14.0;
 const TEXT_EDIT_MIN_HEIGHT: f32 = 30.0;
+/// ドラッグでテキストボックスを作る最小サイズ。これ未満はクリック扱い。
+const TEXT_BOX_MIN_WIDTH: f32 = 40.0;
+const TEXT_BOX_MIN_HEIGHT: f32 = TEXT_EDIT_MIN_HEIGHT;
 
 fn palette_group_width(count: usize) -> f32 {
     f32::from(PALETTE_MARGIN_X) * 2.0
@@ -289,6 +307,8 @@ pub struct DoodApp {
     status: Arc<Mutex<Status>>,
     busy: Arc<AtomicBool>,
     pending_export: Option<ExportKind>,
+    /// ツールバーの「ペースト」または ⌘⇧V で、クリップボードを直接読む要求。
+    paste_requested: bool,
     /// 通知が写り込まないよう、次のフレームで通知を描かずに撮影する。
     capture_next_frame: bool,
     always_on_top: bool,
@@ -317,6 +337,7 @@ impl DoodApp {
             status: Arc::new(Mutex::new(Status::default())),
             busy: Arc::new(AtomicBool::new(false)),
             pending_export: None,
+            paste_requested: false,
             capture_next_frame: false,
             always_on_top: true,
             canvas_rect: Rect::NOTHING,
@@ -333,6 +354,10 @@ impl DoodApp {
 
     pub fn tool(&self) -> Tool {
         self.tool
+    }
+
+    pub fn canvas_rect(&self) -> Rect {
+        self.canvas_rect
     }
 
     pub fn scene_mut(&mut self) -> &mut Scene {
@@ -378,6 +403,9 @@ impl DoodApp {
             Action::Export(kind) => {
                 self.pending_export = Some(kind);
             }
+            Action::PasteImage => {
+                self.paste_requested = true;
+            }
         }
     }
 
@@ -388,6 +416,9 @@ impl DoodApp {
             let mut pressed = Pressed {
                 copy: input.consume_key(Modifiers::COMMAND, Key::C),
                 save: input.consume_key(Modifiers::COMMAND, Key::S),
+                // ⌘V は egui がクリップボードのテキストを優先して消費するため、
+                // 画像を直接読みたいときは ⌘⇧V を使う。
+                paste_image: input.consume_key(command_shift(), Key::V),
                 clear: input.consume_key(Modifiers::COMMAND, Key::Backspace),
                 redo: input.consume_key(command_shift(), Key::Z),
                 undo: input.consume_key(Modifiers::COMMAND, Key::Z),
@@ -429,6 +460,9 @@ impl DoodApp {
         }
         if pressed.save {
             self.pending_export = Some(ExportKind::Save);
+        }
+        if pressed.paste_image {
+            self.apply(Action::PasteImage);
         }
         if pressed.undo {
             self.apply(Action::Undo);
@@ -476,14 +510,62 @@ impl DoodApp {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
+
         let pasted = ctx.input(|input| {
             input.events.iter().find_map(|event| match event {
-                egui::Event::PasteImage(image) => Some(image.clone()),
+                egui::Event::PasteImage(image) => Some(PasteContent::Image(image.clone())),
+                egui::Event::Paste(text) => Some(PasteContent::Text(text.clone())),
                 _ => None,
             })
         });
-        if let Some(image) = pasted {
-            self.apply_background(ctx, image);
+
+        match pasted {
+            Some(PasteContent::Image(image)) => self.apply_background(ctx, image),
+            // Linux のファイルマネージャは画像データではなく `text/uri-list` を
+            // テキストとして置くため、パスから読み直す。
+            Some(PasteContent::Text(text)) => {
+                if !self.paste_image_file(ctx, &text)
+                    && should_try_clipboard_image(&text)
+                    && let Ok(Some(image)) = read_clipboard_image()
+                {
+                    // ブラウザの「画像をコピー」は text/html と画像が同居するため、
+                    // egui がテキストを優先してもクリップボードから画像を拾う。
+                    self.apply_background(ctx, Arc::new(image));
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// クリップボードのテキストが画像ファイルのパス（または URI）なら背景に貼る。
+    /// 貼れたかどうかを返す。
+    fn paste_image_file(&mut self, ctx: &egui::Context, text: &str) -> bool {
+        let paths = pasted_file_paths(text);
+        let mut last_error = None;
+        for path in paths {
+            match load_image_file(&path) {
+                Ok(image) => {
+                    self.apply_background(ctx, Arc::new(image));
+                    return true;
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        if let Some(error) = last_error {
+            self.set_status(error, true);
+        }
+        false
+    }
+
+    /// ツールバーの「ペースト」ボタン・⌘⇧V の要求を処理する。
+    fn flush_clipboard_paste(&mut self, ctx: &egui::Context) {
+        if !std::mem::take(&mut self.paste_requested) {
+            return;
+        }
+        match read_clipboard_image() {
+            Ok(Some(image)) => self.apply_background(ctx, Arc::new(image)),
+            Ok(None) => self.set_status("クリップボードに画像がありません", true),
+            Err(error) => self.set_status(error, true),
         }
     }
 
@@ -598,7 +680,11 @@ impl DoodApp {
     }
 
     fn export_width(&self, ui: &egui::Ui) -> f32 {
-        theme::pill_button_width(ui, "コピー") + 5.0 + theme::pill_button_width(ui, "保存")
+        theme::pill_button_width(ui, "ペースト")
+            + 5.0
+            + theme::pill_button_width(ui, "コピー")
+            + 5.0
+            + theme::pill_button_width(ui, "保存")
     }
 
     fn draw_toolbar_group(
@@ -702,7 +788,8 @@ impl DoodApp {
         }
     }
 
-    /// 右寄せの書き出しボタン。Right-to-Left レイアウトなので保存 → コピーの順に置く。
+    /// 右寄せの書き出し・貼り付けボタン。Right-to-Left レイアウトなので
+    /// 保存 → コピー → ペースト の順に置く（画面では左から ペースト・コピー・保存）。
     fn export_buttons(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let save_tip = format!(
             "PNG を保存してパスをコピー (⌘S)\n保存先: {}",
@@ -732,6 +819,19 @@ impl DoodApp {
         .clicked()
         {
             actions.push(Action::Export(ExportKind::Copy));
+        }
+
+        if theme::pill_button(
+            ui,
+            ActionIcon::Paste,
+            "ペースト",
+            ButtonVariant::FilledTonal,
+            true,
+        )
+        .on_hover_text("クリップボードから画像を貼り付ける (⌘⇧V)")
+        .clicked()
+        {
+            actions.push(Action::PasteImage);
         }
     }
 
@@ -912,12 +1012,21 @@ impl DoodApp {
             .interact_pointer_pos()
             .map(|pos| Pos2::new(pos.x - rect.min.x, pos.y - rect.min.y));
 
+        // ドラッグ開始はしきい値を超えた位置で通知されるため、始点は押下位置から取る。
+        let origin = response.ctx.input(|input| input.pointer.press_origin());
+        let start = origin
+            .map(|pos| Pos2::new(pos.x - rect.min.x, pos.y - rect.min.y))
+            .or(local);
+
         if response.drag_started()
-            && let Some(at) = local
+            && let Some(at) = start
         {
             self.draft = match self.tool {
                 Tool::Pen => Some(Draft::Freehand { points: vec![at] }),
-                Tool::Text => None,
+                Tool::Text => Some(Draft::TextBox {
+                    start: at,
+                    current: at,
+                }),
                 _ => Some(Draft::Shape {
                     start: at,
                     current: at,
@@ -934,16 +1043,29 @@ impl DoodApp {
                         points.push(at);
                     }
                 }
-                Draft::Shape { current, .. } => *current = at,
+                Draft::Shape { current, .. } | Draft::TextBox { current, .. } => *current = at,
             }
         }
 
         if response.drag_stopped()
             && let Some(draft) = self.draft.take()
-            && let Some(item) = self.item_from_draft(draft)
         {
-            self.history.record(&self.scene);
-            self.scene.push(item);
+            match draft {
+                Draft::TextBox { start, current } => {
+                    if let Some(box_rect) = text_box_rect(start, current) {
+                        self.open_text_box(box_rect);
+                    } else {
+                        // 小さすぎるドラッグはクリックと同じ扱い。
+                        self.open_text(start);
+                    }
+                }
+                draft => {
+                    if let Some(item) = self.item_from_draft(draft) {
+                        self.history.record(&self.scene);
+                        self.scene.push(item);
+                    }
+                }
+            }
         }
 
         if response.clicked()
@@ -972,6 +1094,7 @@ impl DoodApp {
                 width: self.width(),
             }),
             Draft::Shape { start, current } => self.shape_item(start, current),
+            Draft::TextBox { .. } => None,
         }
     }
 
@@ -1021,19 +1144,52 @@ impl DoodApp {
                 width: self.width(),
             }),
             Draft::Shape { start, current } => self.shape_item(*start, *current),
+            Draft::TextBox { start, current } => {
+                let rect = Rect::from_two_pos(*start, *current);
+                (rect.width() >= 2.0 && rect.height() >= 2.0).then_some(Item::Rect {
+                    a: *start,
+                    b: *current,
+                    color: self.color.gamma_multiply(0.55),
+                    width: 1.0,
+                })
+            }
         }
     }
 
     // ---- テキスト入力 ---------------------------------------------------
 
+    /// クリック位置に既定幅の入力欄を開く。
     fn open_text(&mut self, at: Pos2) {
         self.draft = None;
         self.text = Some(TextDraft {
-            pos: at,
+            rect: Rect::from_min_size(at, Vec2::new(TEXT_EDIT_WIDTH, TEXT_EDIT_MIN_HEIGHT)),
             buffer: String::new(),
             focused: false,
             color: self.color,
             size: self.text_size(),
+            fixed_box: false,
+        });
+    }
+
+    /// ドラッグで指定した矩形いっぱいの入力欄を開く。
+    fn open_text_box(&mut self, rect: Rect) {
+        self.draft = None;
+        let canvas = self.canvas_rect;
+        let rect = if canvas.is_positive() {
+            rect.intersect(canvas)
+        } else {
+            rect
+        };
+        if !rect.is_positive() {
+            return;
+        }
+        self.text = Some(TextDraft {
+            rect,
+            buffer: String::new(),
+            focused: false,
+            color: self.color,
+            size: self.text_size(),
+            fixed_box: true,
         });
     }
 
@@ -1050,16 +1206,30 @@ impl DoodApp {
         #[allow(deprecated)]
         let id = Id::new("dood_text_input");
 
-        let width = TEXT_EDIT_WIDTH.min((canvas.width() - 4.0).max(24.0));
-        let height = text_editor_height(ui, &draft, width);
-        let rect = place_text_editor(canvas, draft.pos, width, height);
+        let width = draft
+            .rect
+            .width()
+            .min((canvas.width() - 4.0).max(24.0))
+            .max(24.0);
+        let height = if draft.fixed_box {
+            draft.rect.height().max(TEXT_EDIT_MIN_HEIGHT)
+        } else {
+            text_editor_height(ui, &draft, width)
+        };
+        let rect = place_text_editor(canvas, draft.rect.min, width, height);
+        // 選択した矩形いっぱいに見えるよう、行数から高さを合わせる。
+        let rows = if draft.fixed_box {
+            ((height / (draft.size * 1.25)).floor() as usize).max(1)
+        } else {
+            1
+        };
 
         let response = ui.put(
             rect,
             TextEdit::multiline(&mut draft.buffer)
                 .id(id)
                 .desired_width(width)
-                .desired_rows(1)
+                .desired_rows(rows)
                 .return_key(Some(egui::KeyboardShortcut::new(
                     Modifiers::SHIFT,
                     Key::Enter,
@@ -1116,10 +1286,11 @@ impl DoodApp {
         }
         self.history.record(&self.scene);
         self.scene.push(Item::Text {
-            pos: draft.pos,
+            pos: draft.rect.min,
             text,
             size: draft.size,
             color: draft.color,
+            wrap_width: Some(text_wrap_width(draft.rect.width())),
         });
     }
 
@@ -1206,6 +1377,7 @@ impl DoodApp {
 
         ui.spacing_mut().item_spacing.y = 0.0;
         self.toolbar(ui);
+        self.flush_clipboard_paste(ui.ctx());
         let area = ui.available_rect_before_wrap();
         self.canvas(ui, area);
         self.text_editor(ui);
@@ -1236,6 +1408,150 @@ fn place_text_editor(canvas: Rect, pos: Pos2, width: f32, height: f32) -> Rect {
     let x = (canvas.min.x + pos.x).clamp(canvas.min.x, max_x);
     let y = (canvas.min.y + pos.y).clamp(canvas.min.y, max_y);
     Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, height))
+}
+
+/// ドラッグの矩形がテキストボックスとして使える大きさなら返す。
+fn text_box_rect(start: Pos2, current: Pos2) -> Option<Rect> {
+    let rect = Rect::from_two_pos(start, current);
+    (rect.width() >= TEXT_BOX_MIN_WIDTH && rect.height() >= TEXT_BOX_MIN_HEIGHT).then_some(rect)
+}
+
+/// 確定後のテキストを折り返す幅。入力欄の内側余白ぶんを差し引く。
+fn text_wrap_width(box_width: f32) -> f32 {
+    (box_width - TEXT_EDIT_PADDING).max(24.0)
+}
+
+enum PasteContent {
+    Image(Arc<ColorImage>),
+    Text(String),
+}
+
+/// 貼り付けられたテキストから、実在するファイルのパスを取り出す。
+///
+/// Linux のファイルマネージャはコピーしたファイルを `text/uri-list`
+/// （`file:///path/to/image.png` を改行区切り）として置く。素のパスを返す
+/// アプリもあるため、どちらも受け付ける。
+fn pasted_file_paths(text: &str) -> Vec<PathBuf> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(parse_pasted_path)
+        .collect()
+}
+
+fn parse_pasted_path(line: &str) -> Option<PathBuf> {
+    let path = match line.strip_prefix("file://") {
+        Some(rest) => {
+            let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+            // Windows の file:///C:/... は先頭の / を落とす。
+            let rest = match rest.as_bytes() {
+                [b'/', drive, b':', ..] if drive.is_ascii_alphabetic() => &rest[1..],
+                _ => rest,
+            };
+            PathBuf::from(percent_decode(rest))
+        }
+        None => PathBuf::from(line),
+    };
+    path.is_file().then_some(path)
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && let (Some(high), Some(low)) = (
+                bytes.get(index + 1).and_then(|byte| hex_digit(*byte)),
+                bytes.get(index + 2).and_then(|byte| hex_digit(*byte)),
+            )
+        {
+            out.push(high * 16 + low);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// テキスト貼り付けの裏に画像がありそうか。
+///
+/// ブラウザの「画像をコピー」は HTML と画像を同時に置く。素のテキストや
+/// ファイルパスでは、クリップボードを二重に読まない。
+fn should_try_clipboard_image(text: &str) -> bool {
+    text.trim_start().starts_with('<')
+}
+
+/// クリップボードを直接読み、画像（または画像ファイル）を取り出す。
+///
+/// egui の `PasteImage` はクリップボードにテキストがあると発火しないため、
+/// ツールバーの「ペースト」と ⌘⇧V ではこの経路を使う。
+fn read_clipboard_image() -> Result<Option<ColorImage>, String> {
+    let mut clipboard = arboard::Clipboard::new()
+        .map_err(|error| format!("クリップボードを開けません: {error}"))?;
+
+    match clipboard.get().image() {
+        Ok(image) => return Ok(Some(color_image_from_arboard(image))),
+        Err(error) => eprintln!("dood: clipboard image: {error}"),
+    }
+
+    let mut last_error = None;
+    match clipboard.get().file_list() {
+        Ok(paths) => {
+            eprintln!("dood: clipboard file list: {} paths", paths.len());
+            for path in paths {
+                match load_image_file(&path) {
+                    Ok(image) => return Ok(Some(image)),
+                    Err(error) => last_error = Some(error),
+                }
+            }
+        }
+        Err(error) => eprintln!("dood: clipboard file list: {error}"),
+    }
+    match clipboard.get().text() {
+        Ok(text) => {
+            let paths = pasted_file_paths(&text);
+            eprintln!("dood: clipboard text: {} file paths", paths.len());
+            for path in paths {
+                match load_image_file(&path) {
+                    Ok(image) => return Ok(Some(image)),
+                    Err(error) => last_error = Some(error),
+                }
+            }
+        }
+        Err(error) => eprintln!("dood: clipboard text: {error}"),
+    }
+
+    if let Some(error) = last_error {
+        return Err(error);
+    }
+    Ok(None)
+}
+
+fn color_image_from_arboard(image: arboard::ImageData<'_>) -> ColorImage {
+    ColorImage::from_rgba_unmultiplied([image.width, image.height], image.bytes.as_ref())
+}
+
+/// 画像ファイルを読み込んで egui の画像にする。
+fn load_image_file(path: &Path) -> Result<ColorImage, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("画像ファイルを読めません: {} ({error})", path.display()))?;
+    let image = image::load_from_memory(&bytes)
+        .map_err(|error| format!("画像ファイルを読めません: {} ({error})", path.display()))?;
+    let rgba = image.to_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    Ok(ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
 }
 
 fn command_shift() -> Modifiers {
@@ -1274,6 +1590,7 @@ mod tests {
             status: Arc::new(Mutex::new(Status::default())),
             busy: Arc::new(AtomicBool::new(false)),
             pending_export: None,
+            paste_requested: false,
             capture_next_frame: false,
             always_on_top: true,
             canvas_rect: Rect::NOTHING,
@@ -1281,12 +1598,16 @@ mod tests {
     }
 
     fn key_event(key: Key) -> egui::Event {
+        key_event_with_modifiers(key, Modifiers::NONE)
+    }
+
+    fn key_event_with_modifiers(key: Key, modifiers: Modifiers) -> egui::Event {
         egui::Event::Key {
             key,
             physical_key: None,
             pressed: true,
             repeat: false,
-            modifiers: Modifiers::NONE,
+            modifiers,
         }
     }
 
@@ -1465,6 +1786,32 @@ mod tests {
     }
 
     #[test]
+    fn command_shift_v_requests_a_direct_clipboard_paste() {
+        let mut app = test_app();
+        run_with_events(
+            &mut app,
+            vec![key_event_with_modifiers(Key::V, command_shift())],
+            |app, ctx| app.handle_shortcuts(ctx),
+        );
+
+        assert!(app.paste_requested, "⌘⇧V がペースト要求になっていない");
+    }
+
+    #[test]
+    fn arboard_image_converts_to_egui_image() {
+        let image = color_image_from_arboard(arboard::ImageData {
+            width: 1,
+            height: 1,
+            bytes: std::borrow::Cow::Owned(vec![255, 0, 0, 255]),
+        });
+        assert_eq!(image.size, [1, 1]);
+        assert_eq!(
+            image.pixels[0],
+            Color32::from_rgba_unmultiplied(255, 0, 0, 255)
+        );
+    }
+
+    #[test]
     fn paste_image_works_when_not_editing() {
         let mut app = test_app();
         let image = ColorImage::new([2, 2], vec![Color32::RED; 4]);
@@ -1476,5 +1823,91 @@ mod tests {
         );
 
         assert!(app.scene.bg.is_some(), "背景画像が貼り付かない");
+    }
+
+    #[test]
+    fn drag_must_be_large_enough_to_make_a_text_box() {
+        assert!(text_box_rect(Pos2::new(10.0, 20.0), Pos2::new(50.0, 50.0)).is_some());
+        assert!(text_box_rect(Pos2::new(10.0, 20.0), Pos2::new(49.0, 50.0)).is_none());
+        assert!(text_box_rect(Pos2::new(10.0, 20.0), Pos2::new(50.0, 49.0)).is_none());
+    }
+
+    #[test]
+    fn wrap_width_leaves_room_for_the_editor_padding() {
+        assert_eq!(text_wrap_width(260.0), 260.0 - TEXT_EDIT_PADDING);
+        assert_eq!(text_wrap_width(10.0), 24.0);
+    }
+
+    // ---- ファイル貼り付け ---------------------------------------------
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dood-paste-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn write_test_png(path: &Path) {
+        let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
+        image.save(path).expect("write png");
+    }
+
+    #[test]
+    fn pasted_uri_list_yields_existing_files() {
+        let dir = temp_dir("uri-list");
+        let image = dir.join("a b.png");
+        write_test_png(&image);
+
+        let uri = format!("file://{}", image.display()).replace(' ', "%20");
+        let text = format!("# copied files\r\n{uri}\r\nfile:///missing.png\r\n");
+        let paths = pasted_file_paths(&text);
+
+        assert_eq!(paths, vec![image]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn percent_decode_handles_spaces_and_multibyte_characters() {
+        assert_eq!(percent_decode("a%20b"), "a b");
+        assert_eq!(percent_decode("%E6%97%A5%E6%9C%AC"), "日本");
+        // 不正な % はそのまま残す。
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    #[test]
+    fn paste_image_file_sets_the_background() {
+        let dir = temp_dir("paste-file");
+        let image = dir.join("shot.png");
+        write_test_png(&image);
+
+        let mut app = test_app();
+        let text = format!("file://{}", image.display());
+        run_with_events(&mut app, vec![egui::Event::Paste(text)], |app, ctx| {
+            app.handle_paste(ctx);
+        });
+
+        assert!(app.scene.bg.is_some(), "画像ファイルが背景に貼り付かない");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn html_paste_may_hide_an_image_but_plain_text_does_not() {
+        assert!(should_try_clipboard_image(
+            "<meta charset=\"utf-8\"><img src=...>"
+        ));
+        assert!(!should_try_clipboard_image("こんにちは"));
+        assert!(!should_try_clipboard_image("file:///tmp/a.png"));
+    }
+
+    #[test]
+    fn paste_plain_text_is_not_treated_as_an_image() {
+        let mut app = test_app();
+        run_with_events(
+            &mut app,
+            vec![egui::Event::Paste("こんにちは".to_owned())],
+            |app, ctx| app.handle_paste(ctx),
+        );
+
+        assert!(app.scene.bg.is_none());
     }
 }

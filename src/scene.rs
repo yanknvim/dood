@@ -39,6 +39,8 @@ pub enum Item {
         text: String,
         size: f32,
         color: Color32,
+        /// 自動折り返しの最大幅（pt）。`None` なら折り返さない。
+        wrap_width: Option<f32>,
     },
 }
 

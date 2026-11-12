@@ -59,6 +59,17 @@ fn type_text(harness: &mut egui_kittest::Harness<'static, AppState>, text: &str)
     harness.run();
 }
 
+fn drag(harness: &mut egui_kittest::Harness<'static, AppState>, from: Pos2, to: Pos2) {
+    harness.hover_at(from);
+    harness.run();
+    harness.drag_at(from);
+    harness.run();
+    harness.hover_at(to);
+    harness.run();
+    harness.drop_at(to);
+    harness.run();
+}
+
 #[test]
 fn shift_enter_writes_a_multiline_text_item() {
     let mut harness = build_harness();
@@ -120,5 +131,46 @@ fn escape_discards_the_text_draft() {
     assert!(
         app(&harness).scene().items.is_empty(),
         "Esc で破棄されずにテキストが確定した"
+    );
+}
+
+#[test]
+fn dragging_a_text_box_keeps_the_text_inside_the_box() {
+    let mut harness = build_harness();
+
+    harness.key_press(Key::T);
+    harness.run();
+    drag(&mut harness, pos2(100.0, 200.0), pos2(320.0, 300.0));
+
+    // 矩形いっぱいの入力欄が開き、その幅で折り返す。
+    type_text(&mut harness, "hello world");
+    harness.key_press(Key::Enter);
+    harness.run();
+
+    let canvas = app(&harness).canvas_rect();
+    let texts: Vec<(Pos2, Option<f32>)> = app(&harness)
+        .scene()
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Text {
+                pos, wrap_width, ..
+            } => Some((*pos, *wrap_width)),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(texts.len(), 1, "矩形ドラッグでテキストが確定していない");
+    let (pos, wrap_width) = texts[0];
+    let expected = pos2(100.0 - canvas.min.x, 200.0 - canvas.min.y);
+    assert!(
+        (pos.x - expected.x).abs() < 0.01 && (pos.y - expected.y).abs() < 0.01,
+        "ボックスの左上が押下位置とずれている: pos={pos:?}, expected={expected:?}"
+    );
+    // 矩形幅 220pt から入力欄の左右余白 14pt を引いた幅で折り返す。
+    assert_eq!(
+        wrap_width,
+        Some(206.0),
+        "選択した矩形の幅で折り返していない"
     );
 }

@@ -1,7 +1,7 @@
 //! シーンの描画。画面表示とテスト（画素検証）で同じ関数を使う。
 
 use eframe::egui::{
-    Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2,
+    self, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2,
 };
 
 use crate::scene::{Item, Scene};
@@ -45,28 +45,13 @@ pub fn draw_item_on(painter: &Painter, rect: Rect, item: &Item) {
                 painter.add(Shape::line(points, Stroke::new(*width, *color)));
             }
         },
-        Item::Line {
-            a,
-            b,
-            color,
-            width,
-        } => {
+        Item::Line { a, b, color, width } => {
             painter.line_segment([at(*a), at(*b)], Stroke::new(*width, *color));
         }
-        Item::Arrow {
-            a,
-            b,
-            color,
-            width,
-        } => {
+        Item::Arrow { a, b, color, width } => {
             draw_arrow(painter, at(*a), at(*b), *color, *width);
         }
-        Item::Rect {
-            a,
-            b,
-            color,
-            width,
-        } => {
+        Item::Rect { a, b, color, width } => {
             let rect = Rect::from_two_pos(at(*a), at(*b));
             painter.add(Shape::rect_stroke(
                 rect,
@@ -92,14 +77,18 @@ pub fn draw_item_on(painter: &Painter, rect: Rect, item: &Item) {
             text,
             size,
             color,
+            wrap_width,
         } => {
-            painter.text(
-                at(*pos),
-                Align2::LEFT_TOP,
-                text,
+            let mut job = egui::text::LayoutJob::simple(
+                text.clone(),
                 FontId::proportional(*size),
                 *color,
+                wrap_width.unwrap_or(f32::INFINITY),
             );
+            // 選択したテキストボックスの幅に収めるため、長い語も途中で折り返す。
+            job.wrap.break_anywhere = true;
+            let galley = painter.layout_job(job);
+            painter.galley(at(*pos), galley, *color);
         }
     }
 }

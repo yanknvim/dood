@@ -78,6 +78,7 @@ fn make_app(ctx: &eframe::egui::Context) -> DoodApp {
         text: "dood".to_owned(),
         size: 24.0,
         color: ink,
+        wrap_width: None,
     });
     app.push_item(Item::Arrow {
         a: pos2(455.0, 285.0),
@@ -90,6 +91,7 @@ fn make_app(ctx: &eframe::egui::Context) -> DoodApp {
         text: "雑な図が書けるツール".to_owned(),
         size: 24.0,
         color: ink,
+        wrap_width: None,
     });
     // 複数行テキスト（Shift+Enter で改行）の見た目確認用。
     app.push_item(Item::Text {
@@ -97,6 +99,8 @@ fn make_app(ctx: &eframe::egui::Context) -> DoodApp {
         text: "Shift+Enter で改行できる。\n日本語 English 混在もこの通り。".to_owned(),
         size: 24.0,
         color: ink,
+        // 矩形選択で作ったテキストボックスを想定した折り返し幅。
+        wrap_width: Some(320.0),
     });
     app
 }

@@ -1,7 +1,12 @@
 ---
-status: Accepted
+status: Superseded
 date: 2026-11-12
+superseded_by: 0011-system-font-via-fontique.md
 ---
+
+> **Superseded by [ADR 0011](0011-system-font-via-fontique.md)**: フォントの探索を固定パスから
+> fontique によるシステムフォント解決へ変え、ウェイトを Medium に固定した。ボタンラベルを
+> 実寸 galley の中心に置く方針は 0011 でも維持している。
 
 # Context
 

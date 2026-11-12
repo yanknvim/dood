@@ -7,7 +7,7 @@ use dood::{
     render,
     scene::{Item, Scene},
 };
-use eframe::egui::{pos2, Color32, Pos2, Rect, Vec2};
+use eframe::egui::{Color32, Pos2, Rect, Vec2, pos2};
 
 const SIZE: Vec2 = Vec2::new(200.0, 100.0);
 
@@ -85,4 +85,33 @@ fn shapes_are_visible_in_their_given_colors() {
         .any(|p| p.0[2] > 150 && p.0[0] < 110 && p.0[1] < 140);
     assert!(has_red, "矩形の赤が見えない");
     assert!(has_blue, "楕円の青が見えない");
+}
+
+#[test]
+fn text_stays_inside_its_wrap_width() {
+    let mut scene = Scene::default();
+    scene.push(Item::Text {
+        pos: pos2(10.0, 10.0),
+        text: "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww".to_owned(),
+        size: 24.0,
+        color: Color32::BLACK,
+        wrap_width: Some(80.0),
+    });
+
+    let image = render_scene(&scene);
+    // 箱（左 10pt + 幅 80pt）より右にはインクが無い。
+    for y in 0..100 {
+        for x in 100..200 {
+            assert!(
+                luma(image.get_pixel(x, y)) > 240,
+                "({x}, {y}) に折り返し外のインクがある: {:?}",
+                image.get_pixel(x, y).0
+            );
+        }
+    }
+    // 折り返したテキスト自体は描かれている。
+    assert!(
+        (0..100).any(|y| (10..100).any(|x| luma(image.get_pixel(x, y)) < 100)),
+        "テキストが描かれていない"
+    );
 }

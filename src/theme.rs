@@ -5,11 +5,12 @@
 //!       https://m3.material.io/components/buttons/specs
 //!       https://m3.material.io/components/toolbars/specs
 
-use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use eframe::egui::{
-    self, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Response, Sense, Shape, Stroke,
-    StrokeKind, Ui, Vec2, pos2, text::Galley, vec2,
+    self, Color32, CornerRadius, FontData, FontId, FontInsert, FontPriority, InsertFontFamily,
+    Painter, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, Vec2,
+    epaint::text::VariationCoords, pos2, text::Galley, vec2,
 };
 
 use crate::tool::Tool;
@@ -56,53 +57,104 @@ pub const SWATCH_SIZE: f32 = 24.0;
 
 // ---- Fonts -----------------------------------------------------------------
 
-/// UI に使うシステムフォントの候補。先頭ほど優先する。
+/// UI フォントに要求するウェイト。
 ///
-/// 欧文と和文を同じフォントファイルで描き、フォールバックによるメトリクス差をなくす。
-/// フォントは同梱しない（ADR 0007）。
-pub fn system_font_candidates() -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = [
-        "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc",
-        "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
-        "/System/Library/Fonts/Hiragino Sans GB.ttc",
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .collect();
+/// システムによっては既定の欧文フォントが Light（egui 同梱の Ubuntu-Light など）で、
+/// また Noto Sans CJK の可変フォントは既定が Thin（wght=100）なので、そのままでは細すぎる。
+/// Medium（500）を要求し、可変フォントには `wght` 軸も明示する。
+const UI_FONT_WEIGHT: f32 = 500.0;
+// Thin / Light（100–300）を引くと UI が細すぎるため、Regular 以上を要求する。
+const _: () = assert!(UI_FONT_WEIGHT >= 400.0);
 
-    if let Some(home) = std::env::var_os("HOME") {
-        paths.push(PathBuf::from(home).join("Library/Fonts/NotoSansCJKjp-Regular.otf"));
-    }
-    paths
+#[derive(Clone)]
+struct SystemUiFont {
+    family: String,
+    data: FontData,
 }
 
-/// 候補を順に読み、最初に読めたフォントを返す。
-fn read_first_font(paths: impl IntoIterator<Item = PathBuf>) -> Option<(PathBuf, Vec<u8>)> {
-    paths
-        .into_iter()
-        .find_map(|path| std::fs::read(&path).ok().map(|bytes| (path, bytes)))
+/// システムの和文・欧文統合フォントを1つ読み、プロセス内で使い回す。
+///
+/// パス決め打ちでは NixOS などフォントの配置がビルドごとに変わる環境を拾えないため、
+/// fontique（Linux は fontconfig、macOS は CoreText）でシステムフォントを引く。
+/// 和文と欧文の両方を描けるフォントを優先し、無ければ最初の候補にフォールバックする。
+fn system_ui_font() -> Option<&'static SystemUiFont> {
+    static CACHE: OnceLock<Option<SystemUiFont>> = OnceLock::new();
+    CACHE.get_or_init(load_system_ui_font).as_ref()
+}
+
+fn load_system_ui_font() -> Option<SystemUiFont> {
+    let mut collection = fontique::Collection::new(fontique::CollectionOptions {
+        shared: false,
+        system_fonts: true,
+    });
+    let mut source_cache = fontique::SourceCache::new(fontique::SourceCacheOptions::default());
+    let locale = fontique::Language::parse("ja").ok();
+
+    let mut first_match: Option<fontique::QueryFont> = None;
+    let mut full_match: Option<fontique::QueryFont> = None;
+    {
+        let mut query = collection.query(&mut source_cache);
+        query.set_families([fontique::QueryFamily::Generic(
+            fontique::GenericFamily::SansSerif,
+        )]);
+        query.set_attributes(fontique::Attributes {
+            weight: fontique::FontWeight::MEDIUM,
+            ..Default::default()
+        });
+        query.set_fallbacks(fontique::FallbackKey::new(
+            fontique::Script::from_bytes(*b"Hani"),
+            locale.as_ref(),
+        ));
+        query.matches_with(|font| {
+            first_match.get_or_insert_with(|| font.clone());
+            if can_render(font, 'A') && can_render(font, 'あ') {
+                full_match = Some(font.clone());
+                fontique::QueryStatus::Stop
+            } else {
+                fontique::QueryStatus::Continue
+            }
+        });
+    }
+
+    let font = full_match.or(first_match)?;
+    let family = collection
+        .family_name(font.family.0)
+        .unwrap_or("system")
+        .to_owned();
+    let index = font.index;
+    let (blob, _) = font.blob.into_raw_parts();
+    let mut data = FontData::from_blob(blob, index);
+
+    // 可変フォントは既定が Thin のことがあるため、ウェイト軸を明示する。
+    if data.variation_axes().iter().any(|axis| axis.tag == "wght") {
+        data = data.tweak(egui::FontTweak {
+            coords: VariationCoords::new([(b"wght", UI_FONT_WEIGHT)]),
+            ..Default::default()
+        });
+    }
+
+    Some(SystemUiFont { family, data })
+}
+
+fn can_render(font: &fontique::QueryFont, c: char) -> bool {
+    font.charmap().and_then(|charmap| charmap.map(c)).is_some()
 }
 
 /// システムの和文・欧文統合フォントを `Proportional` の最優先に登録する。
 ///
 /// 見つからなければ何もしない。その場合も eframe の `system_font_fallback` が
-/// 従来どおり和文を描く（字形・メトリクスは環境依存）。
-pub fn configure_fonts(ctx: &egui::Context) -> Option<PathBuf> {
-    let (path, bytes) = read_first_font(system_font_candidates())?;
-    let name = path.file_stem().map_or_else(
-        || "system".to_owned(),
-        |stem| stem.to_string_lossy().into_owned(),
-    );
-
-    ctx.add_font(egui::FontInsert::new(
-        &format!("dood-ui-{name}"),
-        egui::FontData::from_owned(bytes),
-        vec![egui::InsertFontFamily {
+/// 従来どおり和文を描く（字形・メトリクスは環境依存）。フォントは同梱しない。
+pub fn configure_fonts(ctx: &egui::Context) -> Option<String> {
+    let font = system_ui_font()?;
+    ctx.add_font(FontInsert::new(
+        &format!("dood-ui-{}", font.family),
+        font.data.clone(),
+        vec![InsertFontFamily {
             family: egui::FontFamily::Proportional,
-            priority: egui::FontPriority::Highest,
+            priority: FontPriority::Highest,
         }],
     ));
-    Some(path)
+    Some(font.family.clone())
 }
 
 /// egui コンテキスト全体に M3 Baseline Light の Visuals を設定する。
@@ -395,6 +447,7 @@ pub enum ActionIcon {
     Clear,
     Copy,
     Save,
+    Paste,
 }
 
 #[derive(Clone, Copy)]
@@ -717,6 +770,19 @@ pub fn draw_action_icon(painter: &Painter, rect: Rect, icon: ActionIcon, color: 
             ));
             painter.rect_stroke(front, CornerRadius::same(1), stroke, StrokeKind::Inside);
         }
+        ActionIcon::Paste => {
+            // クリップボード（貼り付け）
+            let board = Rect::from_min_max(
+                pos2(rect.min.x + 3.0, rect.min.y + 3.0),
+                pos2(rect.max.x - 3.0, rect.max.y - 2.0),
+            );
+            painter.rect_stroke(board, CornerRadius::same(1), stroke, StrokeKind::Inside);
+            painter.rect_filled(
+                Rect::from_center_size(pos2(c.x, board.min.y), vec2(6.0, 3.0)),
+                CornerRadius::same(1),
+                color,
+            );
+        }
         ActionIcon::Save => {
             // 下向き矢印＋トレイ（書き出し・保存）
             let tray_top = rect.max.y - 5.5;
@@ -783,32 +849,6 @@ mod tests {
         assert_eq!(last.sw, 0);
         assert_eq!(last.ne, PILL_RADIUS);
         assert_eq!(last.se, PILL_RADIUS);
-    }
-
-    #[test]
-    fn system_font_candidates_put_hiragino_first() {
-        let candidates = system_font_candidates();
-        assert!(candidates.len() >= 3);
-        assert_eq!(
-            candidates[0],
-            PathBuf::from("/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc")
-        );
-        assert!(candidates.iter().all(|path| path.is_absolute()));
-    }
-
-    #[test]
-    fn read_first_font_skips_unreadable_paths() {
-        let dir = std::env::temp_dir().join(format!("dood-font-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let good = dir.join("good.ttf");
-        std::fs::write(&good, b"not a real font").expect("write temp font");
-
-        let found = read_first_font(vec![dir.join("missing.ttf"), good.clone()])
-            .expect("2番目の候補が読める");
-        assert_eq!(found.0, good);
-        assert_eq!(found.1, b"not a real font");
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
