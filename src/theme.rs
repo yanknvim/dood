@@ -415,6 +415,47 @@ pub fn width_segment(ui: &mut Ui, width_pt: f32, selected: bool, pos: SegmentPos
     response
 }
 
+// ---- Window controls -------------------------------------------------------
+
+/// ウィンドウを閉じるボタン。枠なしウィンドウなので、閉じる操作をツールバー右端にも置く。
+pub fn close_button(ui: &mut Ui) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(CONTROL_HEIGHT), button_sense());
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    let painter = ui.painter();
+    let radius = rect.width() * 0.5;
+    let fill = if response.is_pointer_button_down_on() {
+        blend_state(ERROR_CONTAINER, ERROR, 0.12)
+    } else if response.hovered() {
+        ERROR_CONTAINER
+    } else {
+        Color32::TRANSPARENT
+    };
+    painter.circle_filled(rect.center(), radius, fill);
+
+    // 閉じる操作だと分かるよう、ホバー時だけ Error 色に寄せる。
+    let color = if response.hovered() {
+        ERROR
+    } else {
+        ON_SURFACE_VARIANT
+    };
+    let stroke = Stroke::new(1.7, color);
+    let half = 5.5;
+    let center = rect.center();
+    painter.line_segment(
+        [center + vec2(-half, -half), center + vec2(half, half)],
+        stroke,
+    );
+    painter.line_segment(
+        [center + vec2(half, -half), center + vec2(-half, half)],
+        stroke,
+    );
+
+    response
+}
+
 // ---- M3 Color Swatch -------------------------------------------------------
 
 /// 円形のカラースウォッチ。選択時は外周の Primary リングと内側のチェックマーク（✓）を描く。

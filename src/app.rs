@@ -711,6 +711,8 @@ impl DoodApp {
             + theme::pill_button_width(ui, "コピー")
             + 5.0
             + theme::pill_button_width(ui, "保存")
+            + 5.0
+            + theme::CONTROL_HEIGHT
     }
 
     fn draw_toolbar_group(
@@ -817,6 +819,14 @@ impl DoodApp {
     /// 右寄せの書き出し・貼り付けボタン。Right-to-Left レイアウトなので
     /// 保存 → コピー → ペースト の順に置く（画面では左から ペースト・コピー・保存）。
     fn export_buttons(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        // 右寄せレイアウトなので、最初に置いたものが右端になる。
+        if theme::close_button(ui)
+            .on_hover_text("閉じる (⌘W)")
+            .clicked()
+        {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
         let save_tip = format!(
             "PNG を保存してパスをコピー (⌘S)\n保存先: {}",
             self.out_path.display()
