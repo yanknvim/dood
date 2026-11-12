@@ -1200,9 +1200,10 @@ impl DoodApp {
     /// ドラッグで指定した矩形いっぱいの入力欄を開く。
     fn open_text_box(&mut self, rect: Rect) {
         self.draft = None;
+        // `rect` はキャンバス左上原点、`canvas_rect` は画面座標。同じ座標系で切り取る。
         let canvas = self.canvas_rect;
         let rect = if canvas.is_positive() {
-            rect.intersect(canvas)
+            rect.intersect(Rect::from_min_size(Pos2::ZERO, canvas.size()))
         } else {
             rect
         };
