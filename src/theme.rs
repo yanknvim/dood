@@ -1,0 +1,836 @@
+//! Material Design 3 (M3) Baseline Light カラートークンとカスタムウィジェット。
+//!
+//! 参照: https://m3.material.io/styles/color/roles
+//!       https://m3.material.io/components/segmented-buttons/specs
+//!       https://m3.material.io/components/buttons/specs
+//!       https://m3.material.io/components/toolbars/specs
+
+use std::path::PathBuf;
+
+use eframe::egui::{
+    self, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Response, Sense, Shape, Stroke,
+    StrokeKind, Ui, Vec2, pos2, text::Galley, vec2,
+};
+
+use crate::tool::Tool;
+
+// ---- M3 Baseline Light Color Tokens ----------------------------------------
+
+pub const PRIMARY: Color32 = Color32::from_rgb(0x67, 0x50, 0xA4);
+pub const ON_PRIMARY: Color32 = Color32::from_rgb(0xFF, 0xFF, 0xFF);
+pub const PRIMARY_CONTAINER: Color32 = Color32::from_rgb(0xEA, 0xDD, 0xFF);
+pub const ON_PRIMARY_CONTAINER: Color32 = Color32::from_rgb(0x21, 0x00, 0x5D);
+
+pub const SECONDARY: Color32 = Color32::from_rgb(0x62, 0x5B, 0x71);
+pub const SECONDARY_CONTAINER: Color32 = Color32::from_rgb(0xE8, 0xDE, 0xF8);
+pub const ON_SECONDARY_CONTAINER: Color32 = Color32::from_rgb(0x1D, 0x19, 0x2B);
+
+pub const ERROR: Color32 = Color32::from_rgb(0xB3, 0x26, 0x1E);
+pub const ERROR_CONTAINER: Color32 = Color32::from_rgb(0xF9, 0xDE, 0xDC);
+pub const ON_ERROR_CONTAINER: Color32 = Color32::from_rgb(0x41, 0x0E, 0x0B);
+
+pub const SURFACE: Color32 = Color32::from_rgb(0xFE, 0xF7, 0xFF);
+pub const ON_SURFACE: Color32 = Color32::from_rgb(0x1D, 0x1B, 0x20);
+pub const ON_SURFACE_VARIANT: Color32 = Color32::from_rgb(0x49, 0x45, 0x4F);
+
+pub const SURFACE_CONTAINER_LOWEST: Color32 = Color32::from_rgb(0xFF, 0xFF, 0xFF);
+pub const SURFACE_CONTAINER_LOW: Color32 = Color32::from_rgb(0xF7, 0xF2, 0xFA);
+pub const SURFACE_CONTAINER: Color32 = Color32::from_rgb(0xF3, 0xED, 0xF7);
+pub const SURFACE_CONTAINER_HIGH: Color32 = Color32::from_rgb(0xEC, 0xE6, 0xF0);
+pub const SURFACE_CONTAINER_HIGHEST: Color32 = Color32::from_rgb(0xE6, 0xE0, 0xE9);
+
+pub const OUTLINE: Color32 = Color32::from_rgb(0x79, 0x74, 0x7E);
+pub const OUTLINE_VARIANT: Color32 = Color32::from_rgb(0xCA, 0xC4, 0xD0);
+
+/// ツールバー内の標準コントロール高さ（M3 Compact Density: 32pt）。
+pub const CONTROL_HEIGHT: f32 = 32.0;
+pub const PILL_RADIUS: u8 = 16;
+
+/// カラースウォッチの当たり判定（正方形）の一辺。
+pub const SWATCH_SIZE: f32 = 24.0;
+
+// ---- Fonts -----------------------------------------------------------------
+
+/// UI に使うシステムフォントの候補。先頭ほど優先する。
+///
+/// 欧文と和文を同じフォントファイルで描き、フォールバックによるメトリクス差をなくす。
+/// フォントは同梱しない（ADR 0007）。
+pub fn system_font_candidates() -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = [
+        "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc",
+        "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect();
+
+    if let Some(home) = std::env::var_os("HOME") {
+        paths.push(PathBuf::from(home).join("Library/Fonts/NotoSansCJKjp-Regular.otf"));
+    }
+    paths
+}
+
+/// 候補を順に読み、最初に読めたフォントを返す。
+fn read_first_font(paths: impl IntoIterator<Item = PathBuf>) -> Option<(PathBuf, Vec<u8>)> {
+    paths
+        .into_iter()
+        .find_map(|path| std::fs::read(&path).ok().map(|bytes| (path, bytes)))
+}
+
+/// システムの和文・欧文統合フォントを `Proportional` の最優先に登録する。
+///
+/// 見つからなければ何もしない。その場合も eframe の `system_font_fallback` が
+/// 従来どおり和文を描く（字形・メトリクスは環境依存）。
+pub fn configure_fonts(ctx: &egui::Context) -> Option<PathBuf> {
+    let (path, bytes) = read_first_font(system_font_candidates())?;
+    let name = path.file_stem().map_or_else(
+        || "system".to_owned(),
+        |stem| stem.to_string_lossy().into_owned(),
+    );
+
+    ctx.add_font(egui::FontInsert::new(
+        &format!("dood-ui-{name}"),
+        egui::FontData::from_owned(bytes),
+        vec![egui::InsertFontFamily {
+            family: egui::FontFamily::Proportional,
+            priority: egui::FontPriority::Highest,
+        }],
+    ));
+    Some(path)
+}
+
+/// egui コンテキスト全体に M3 Baseline Light の Visuals を設定する。
+pub fn apply_m3_visuals(ctx: &egui::Context) {
+    let mut visuals = egui::Visuals::light();
+    visuals.panel_fill = SURFACE_CONTAINER;
+    visuals.window_fill = SURFACE;
+    visuals.override_text_color = Some(ON_SURFACE);
+    visuals.widgets.noninteractive.bg_fill = SURFACE_CONTAINER;
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, OUTLINE_VARIANT);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, ON_SURFACE);
+    visuals.widgets.inactive.bg_fill = SURFACE_CONTAINER_HIGH;
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, ON_SURFACE);
+    visuals.widgets.hovered.bg_fill = SECONDARY_CONTAINER;
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, ON_SECONDARY_CONTAINER);
+    visuals.widgets.active.bg_fill = PRIMARY_CONTAINER;
+    visuals.widgets.active.fg_stroke = Stroke::new(1.0, ON_PRIMARY_CONTAINER);
+    visuals.selection.bg_fill = SECONDARY_CONTAINER;
+    visuals.selection.stroke = Stroke::new(1.0, ON_SECONDARY_CONTAINER);
+    ctx.set_visuals(visuals);
+}
+
+/// M3 State Layer の色合成（base の上に state_color を opacity で重ねる）。
+pub fn blend_state(base: Color32, state_color: Color32, opacity: f32) -> Color32 {
+    let [br, bg, bb, _] = base.to_srgba_unmultiplied();
+    let [sr, sg, sb, _] = state_color.to_srgba_unmultiplied();
+    let inv = 1.0 - opacity;
+    let r = (br as f32 * inv + sr as f32 * opacity).round() as u8;
+    let g = (bg as f32 * inv + sg as f32 * opacity).round() as u8;
+    let b = (bb as f32 * inv + sb as f32 * opacity).round() as u8;
+    Color32::from_rgb(r, g, b)
+}
+
+pub fn disabled_fg() -> Color32 {
+    Color32::from_rgba_unmultiplied(0x1D, 0x1B, 0x20, 97) // 38% opacity
+}
+
+// ---- Text metrics ----------------------------------------------------------
+
+const TOOL_LABEL_SIZE: f32 = 12.5;
+const WIDTH_LABEL_SIZE: f32 = 12.0;
+const PILL_LABEL_SIZE: f32 = 12.5;
+
+const ICON_SIZE: f32 = 14.0;
+const ICON_GAP: f32 = 4.0;
+const SEGMENT_PAD_X: f32 = 8.0;
+const WIDTH_PREVIEW_WIDTH: f32 = 12.0;
+const WIDTH_PAD_X: f32 = 7.0;
+const PILL_PAD_X: f32 = 10.0;
+
+fn label_galley(ui: &Ui, text: &str, size: f32) -> std::sync::Arc<Galley> {
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), FontId::proportional(size), ON_SURFACE)
+}
+
+/// テキストの実寸ボックスを `center_y` に上下中央揃えで描く。
+///
+/// `Align2::LEFT_CENTER` はフォントの行メトリクス（内部パディング）基準で中心を決めるため、
+/// 和文・欧文が混ざるとボタン枠の中心からずれる。実寸の galley を中心に置く。
+fn paint_label(
+    painter: &Painter,
+    left_x: f32,
+    center_y: f32,
+    galley: std::sync::Arc<Galley>,
+    color: Color32,
+) {
+    let top_left = pos2(left_x, center_y - galley.size().y * 0.5);
+    // `Painter::galley` は galley 内の色を優先するため、ボタン側の色で上書きする。
+    painter.galley_with_override_text_color(top_left, galley, color);
+}
+
+fn tool_segment_metrics(ui: &Ui, tool: Tool) -> (f32, std::sync::Arc<Galley>) {
+    let galley = label_galley(ui, tool.label(), TOOL_LABEL_SIZE);
+    let width = (SEGMENT_PAD_X * 2.0 + ICON_SIZE + ICON_GAP + galley.size().x).ceil();
+    (width, galley)
+}
+
+/// ツールセグメントの横幅（ツールバーの折り返し計算に使う）。
+pub fn tool_segment_width(ui: &Ui, tool: Tool) -> f32 {
+    tool_segment_metrics(ui, tool).0
+}
+
+/// 太さセグメントの横幅（ツールバーの折り返し計算に使う）。
+pub fn width_segment_width(ui: &Ui, width_pt: f32) -> f32 {
+    let galley = label_galley(ui, &format!("{width_pt:.0}pt"), WIDTH_LABEL_SIZE);
+    (WIDTH_PAD_X * 2.0 + WIDTH_PREVIEW_WIDTH + ICON_GAP + galley.size().x).ceil()
+}
+
+/// アイコン付きピルボタンの横幅（ツールバーの折り返し計算に使う）。
+pub fn pill_button_width(ui: &Ui, label: &str) -> f32 {
+    let galley = label_galley(ui, label, PILL_LABEL_SIZE);
+    (PILL_PAD_X * 2.0 + ICON_SIZE + ICON_GAP + galley.size().x).ceil()
+}
+
+// ---- M3 Segmented Button ---------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SegmentPos {
+    First,
+    Middle,
+    Last,
+}
+
+impl SegmentPos {
+    pub fn corner_radius(self) -> CornerRadius {
+        match self {
+            SegmentPos::First => CornerRadius {
+                nw: PILL_RADIUS,
+                sw: PILL_RADIUS,
+                ne: 0,
+                se: 0,
+            },
+            SegmentPos::Middle => CornerRadius::ZERO,
+            SegmentPos::Last => CornerRadius {
+                nw: 0,
+                sw: 0,
+                ne: PILL_RADIUS,
+                se: PILL_RADIUS,
+            },
+        }
+    }
+}
+
+/// 描画ツール用の M3 Segmented Button セグメント。アイコン＋ラベルを表示する。
+pub fn tool_segment(ui: &mut Ui, tool: Tool, selected: bool, pos: SegmentPos) -> Response {
+    let (width, text_galley) = tool_segment_metrics(ui, tool);
+
+    let (rect, response) = ui.allocate_exact_size(vec2(width, CONTROL_HEIGHT), Sense::click());
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    let base_fill = if selected {
+        SECONDARY_CONTAINER
+    } else {
+        SURFACE_CONTAINER_LOWEST
+    };
+    let fg = if selected {
+        ON_SECONDARY_CONTAINER
+    } else {
+        ON_SURFACE
+    };
+    let fill = if response.is_pointer_button_down_on() {
+        blend_state(base_fill, fg, 0.12)
+    } else if response.hovered() {
+        blend_state(base_fill, fg, 0.08)
+    } else {
+        base_fill
+    };
+
+    let radius = pos.corner_radius();
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, fill);
+    painter.rect_stroke(rect, radius, Stroke::new(1.0, OUTLINE), StrokeKind::Inside);
+
+    let icon_rect = Rect::from_center_size(
+        pos2(
+            rect.min.x + SEGMENT_PAD_X + ICON_SIZE * 0.5,
+            rect.center().y,
+        ),
+        Vec2::splat(ICON_SIZE),
+    );
+    draw_tool_icon(painter, icon_rect, tool, fg);
+
+    paint_label(
+        painter,
+        icon_rect.max.x + ICON_GAP,
+        rect.center().y,
+        text_galley,
+        fg,
+    );
+
+    response
+}
+
+/// 線幅・文字サイズ用の M3 Segmented Button セグメント。実寸の線幅プレビュー＋ラベルを表示する。
+pub fn width_segment(ui: &mut Ui, width_pt: f32, selected: bool, pos: SegmentPos) -> Response {
+    let label = format!("{width_pt:.0}pt");
+    let text_galley = label_galley(ui, &label, WIDTH_LABEL_SIZE);
+    let total_width = width_segment_width(ui, width_pt);
+
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(total_width, CONTROL_HEIGHT), Sense::click());
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    let base_fill = if selected {
+        SECONDARY_CONTAINER
+    } else {
+        SURFACE_CONTAINER_LOWEST
+    };
+    let fg = if selected {
+        ON_SECONDARY_CONTAINER
+    } else {
+        ON_SURFACE
+    };
+    let fill = if response.is_pointer_button_down_on() {
+        blend_state(base_fill, fg, 0.12)
+    } else if response.hovered() {
+        blend_state(base_fill, fg, 0.08)
+    } else {
+        base_fill
+    };
+
+    let radius = pos.corner_radius();
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, fill);
+    painter.rect_stroke(rect, radius, Stroke::new(1.0, OUTLINE), StrokeKind::Inside);
+
+    // 実際の太さが直感でわかる横バーを描く
+    let bar_x = rect.min.x + WIDTH_PAD_X;
+    let bar_h = width_pt.clamp(2.0, 8.0);
+    let bar_rect = Rect::from_min_size(
+        pos2(bar_x, rect.center().y - bar_h * 0.5),
+        vec2(WIDTH_PREVIEW_WIDTH, bar_h),
+    );
+    painter.rect_filled(
+        bar_rect,
+        CornerRadius::same((bar_h * 0.5).round() as u8),
+        fg,
+    );
+
+    paint_label(
+        painter,
+        bar_rect.max.x + ICON_GAP,
+        rect.center().y,
+        text_galley,
+        fg,
+    );
+
+    response
+}
+
+// ---- M3 Color Swatch -------------------------------------------------------
+
+/// 円形のカラースウォッチ。選択時は外周の Primary リングと内側のチェックマーク（✓）を描く。
+pub fn color_swatch(ui: &mut Ui, color: Color32, selected: bool) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(SWATCH_SIZE), Sense::click());
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    let center = rect.center();
+    let base_radius = if response.hovered() && !selected {
+        9.5
+    } else {
+        8.5
+    };
+    let painter = ui.painter();
+
+    // 選択時は外側に M3 Primary のフォーカスリングを表示
+    if selected {
+        painter.circle_stroke(center, base_radius + 2.5, Stroke::new(2.0, PRIMARY));
+    } else if response.hovered() {
+        painter.circle_stroke(center, base_radius + 2.0, Stroke::new(1.5, OUTLINE_VARIANT));
+    }
+
+    painter.circle_filled(center, base_radius, color);
+
+    // 白色スウォッチでも背景に埋もれないよう枠線を入れる
+    let is_light = is_light_color(color);
+    let border_color = if is_light {
+        OUTLINE
+    } else {
+        Color32::from_rgba_unmultiplied(0, 0, 0, 40)
+    };
+    painter.circle_stroke(center, base_radius, Stroke::new(1.0, border_color));
+
+    if selected {
+        let check_color = if is_light { ON_SURFACE } else { Color32::WHITE };
+        draw_check_icon(painter, center, 4.0, check_color);
+    }
+
+    response
+}
+
+fn is_light_color(color: Color32) -> bool {
+    let [r, g, b, _] = color.to_srgba_unmultiplied();
+    let luma = (r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000;
+    luma > 200
+}
+
+// ---- M3 Action Buttons -----------------------------------------------------
+
+#[derive(Clone, Copy)]
+pub enum ActionIcon {
+    Undo,
+    Redo,
+    Clear,
+    Copy,
+    Save,
+}
+
+#[derive(Clone, Copy)]
+pub enum ButtonVariant {
+    /// M3 Filled Button (Primary / OnPrimary) — 最重要アクション用
+    FilledPrimary,
+    /// M3 Filled Tonal Button (SecondaryContainer / OnSecondaryContainer) — 準主要アクション用
+    FilledTonal,
+    /// M3 Outlined Error Button — 破壊的アクション用
+    OutlinedError,
+}
+
+/// M3 の丸型 Outlined アイコンボタン（Undo / Redo 用）。
+pub fn icon_button(ui: &mut Ui, icon: ActionIcon, enabled: bool) -> Response {
+    let size = Vec2::splat(CONTROL_HEIGHT);
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+    if enabled && response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    let painter = ui.painter();
+    let center = rect.center();
+    let radius = CONTROL_HEIGHT * 0.5 - 0.5;
+
+    let fg = if !enabled { disabled_fg() } else { ON_SURFACE };
+
+    let fill = if !enabled {
+        Color32::from_rgba_unmultiplied(0x1D, 0x1B, 0x20, 12)
+    } else if response.is_pointer_button_down_on() {
+        blend_state(SURFACE_CONTAINER_LOWEST, ON_SURFACE, 0.12)
+    } else if response.hovered() {
+        blend_state(SURFACE_CONTAINER_LOWEST, ON_SURFACE, 0.08)
+    } else {
+        SURFACE_CONTAINER_LOWEST
+    };
+    painter.circle_filled(center, radius, fill);
+
+    let border_color = if enabled { OUTLINE } else { OUTLINE_VARIANT };
+    painter.circle_stroke(center, radius, Stroke::new(1.0, border_color));
+
+    let icon_rect = Rect::from_center_size(center, Vec2::splat(15.0));
+    draw_action_icon(painter, icon_rect, icon, fg);
+
+    response
+}
+
+/// アイコン＋ラベル付きの M3 ピル型ボタン（Filled / Tonal / OutlinedError）。
+pub fn pill_button(
+    ui: &mut Ui,
+    icon: ActionIcon,
+    label: &str,
+    variant: ButtonVariant,
+    enabled: bool,
+) -> Response {
+    let text_galley = label_galley(ui, label, PILL_LABEL_SIZE);
+    let width = pill_button_width(ui, label);
+
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(width, CONTROL_HEIGHT), sense);
+    if enabled && response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    let (base_fill, fg, border) = match (variant, enabled) {
+        (_, false) => (
+            Color32::from_rgba_unmultiplied(0x1D, 0x1B, 0x20, 20),
+            disabled_fg(),
+            Some(Stroke::new(1.0, OUTLINE_VARIANT)),
+        ),
+        (ButtonVariant::FilledPrimary, true) => (PRIMARY, ON_PRIMARY, None),
+        (ButtonVariant::FilledTonal, true) => (SECONDARY_CONTAINER, ON_SECONDARY_CONTAINER, None),
+        (ButtonVariant::OutlinedError, true) => {
+            let hover_fill = if response.hovered() || response.is_pointer_button_down_on() {
+                ERROR_CONTAINER
+            } else {
+                SURFACE_CONTAINER_LOWEST
+            };
+            let hover_fg = if response.hovered() || response.is_pointer_button_down_on() {
+                ON_ERROR_CONTAINER
+            } else {
+                ERROR
+            };
+            (hover_fill, hover_fg, Some(Stroke::new(1.0, ERROR)))
+        }
+    };
+
+    let fill = if enabled {
+        if response.is_pointer_button_down_on() {
+            blend_state(base_fill, fg, 0.14)
+        } else if response.hovered() {
+            blend_state(base_fill, fg, 0.08)
+        } else {
+            base_fill
+        }
+    } else {
+        base_fill
+    };
+
+    let radius = CornerRadius::same(PILL_RADIUS);
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, fill);
+    if let Some(stroke) = border {
+        painter.rect_stroke(rect, radius, stroke, StrokeKind::Inside);
+    }
+
+    let icon_rect = Rect::from_center_size(
+        pos2(rect.min.x + PILL_PAD_X + ICON_SIZE * 0.5, rect.center().y),
+        Vec2::splat(ICON_SIZE),
+    );
+    draw_action_icon(painter, icon_rect, icon, fg);
+
+    paint_label(
+        painter,
+        icon_rect.max.x + ICON_GAP,
+        rect.center().y,
+        text_galley,
+        fg,
+    );
+
+    response
+}
+
+/// ツールバーのセクション区切り縦線（M3 Divider: `OUTLINE_VARIANT`）。
+pub fn toolbar_divider(ui: &mut Ui) {
+    let (rect, _) = ui.allocate_exact_size(vec2(6.0, CONTROL_HEIGHT), Sense::hover());
+    let x = rect.center().x;
+    ui.painter().line_segment(
+        [pos2(x, rect.min.y + 6.0), pos2(x, rect.max.y - 6.0)],
+        Stroke::new(1.0, OUTLINE_VARIANT),
+    );
+}
+
+// ---- Vector Icons (Painter Primitives) -------------------------------------
+
+pub fn draw_tool_icon(painter: &Painter, rect: Rect, tool: Tool, color: Color32) {
+    let c = rect.center();
+    let stroke = Stroke::new(1.7, color);
+
+    match tool {
+        Tool::Pen => {
+            // 斜めのペン軸＋ペン先＋小さな筆跡ライン
+            let tip = pos2(rect.min.x + 2.0, rect.max.y - 2.5);
+            let mid_l = pos2(rect.min.x + 4.5, rect.max.y - 7.5);
+            let mid_r = pos2(rect.min.x + 7.5, rect.max.y - 4.5);
+            let top_l = pos2(rect.max.x - 5.5, rect.min.y + 2.0);
+            let top_r = pos2(rect.max.x - 2.5, rect.min.y + 5.0);
+
+            painter.add(Shape::line(
+                vec![tip, mid_l, top_l, top_r, mid_r, tip],
+                Stroke::new(1.4, color),
+            ));
+            painter.line_segment(
+                [
+                    pos2(rect.min.x + 2.0, rect.max.y - 1.5),
+                    pos2(rect.max.x - 2.0, rect.max.y - 1.5),
+                ],
+                Stroke::new(1.4, color),
+            );
+        }
+        Tool::Line => {
+            // 両端にアンカー点を持つ斜線
+            let a = pos2(rect.min.x + 2.5, rect.max.y - 2.5);
+            let b = pos2(rect.max.x - 2.5, rect.min.y + 2.5);
+            painter.line_segment([a, b], stroke);
+            painter.circle_filled(a, 2.0, color);
+            painter.circle_filled(b, 2.0, color);
+        }
+        Tool::Arrow => {
+            // 右上向きの矢印
+            let a = pos2(rect.min.x + 2.0, rect.max.y - 2.0);
+            let b = pos2(rect.max.x - 2.0, rect.min.y + 2.0);
+            painter.line_segment([a, b], stroke);
+            painter.line_segment([b, pos2(b.x - 5.5, b.y)], stroke);
+            painter.line_segment([b, pos2(b.x, b.y + 5.5)], stroke);
+        }
+        Tool::Rect => {
+            let r = Rect::from_center_size(c, vec2(12.0, 9.5));
+            painter.rect_stroke(r, CornerRadius::same(1), stroke, StrokeKind::Inside);
+        }
+        Tool::Ellipse => {
+            painter.add(Shape::ellipse_stroke(c, vec2(6.5, 4.8), stroke));
+        }
+        Tool::Text => {
+            // セリフ付きの「T」アイコン
+            let top_y = rect.min.y + 2.5;
+            let bot_y = rect.max.y - 2.5;
+            let left_x = rect.min.x + 2.5;
+            let right_x = rect.max.x - 2.5;
+            painter.line_segment([pos2(left_x, top_y), pos2(right_x, top_y)], stroke);
+            painter.line_segment(
+                [pos2(left_x, top_y), pos2(left_x, top_y + 2.5)],
+                Stroke::new(1.4, color),
+            );
+            painter.line_segment(
+                [pos2(right_x, top_y), pos2(right_x, top_y + 2.5)],
+                Stroke::new(1.4, color),
+            );
+            painter.line_segment([pos2(c.x, top_y), pos2(c.x, bot_y)], stroke);
+            painter.line_segment(
+                [pos2(c.x - 2.5, bot_y), pos2(c.x + 2.5, bot_y)],
+                Stroke::new(1.4, color),
+            );
+        }
+    }
+}
+
+/// U ターン矢印の折れ線。左（ミラー時は右）端の矢印先端から上辺をたどり、
+/// 反対側の端で半円を 16 分割した滑らかな弧を描いて下辺へ戻る。
+fn u_turn_points(rect: Rect, mirror: bool) -> Vec<Pos2> {
+    const SEGMENTS: usize = 16;
+    const INSET: f32 = 2.5;
+
+    let radius = (rect.height() * 0.5 - 3.0).clamp(3.0, 5.0);
+    let cy = rect.center().y;
+    let width = rect.width();
+    let map_x = |x: f32| {
+        if mirror {
+            rect.max.x - x
+        } else {
+            rect.min.x + x
+        }
+    };
+
+    let arc_cx = width - INSET - radius;
+    let top_y = cy - radius;
+    let bottom_y = cy + radius;
+
+    let mut points = Vec::with_capacity(SEGMENTS + 3);
+    points.push(pos2(map_x(INSET), top_y));
+    points.push(pos2(map_x(arc_cx), top_y));
+    for step in 1..=SEGMENTS {
+        let t = step as f32 / SEGMENTS as f32;
+        let angle = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * t;
+        points.push(pos2(
+            map_x(arc_cx + radius * angle.cos()),
+            cy + radius * angle.sin(),
+        ));
+    }
+    points.push(pos2(map_x(INSET), bottom_y));
+    points
+}
+
+fn draw_u_turn_arrow(painter: &Painter, rect: Rect, color: Color32, mirror: bool) {
+    const INSET: f32 = 2.5;
+    const HEAD: f32 = 3.2;
+
+    let stroke = Stroke::new(1.6, color);
+    let points = u_turn_points(rect, mirror);
+    let tip = points[0];
+
+    painter.add(Shape::line(points, stroke));
+
+    let map_x = |x: f32| {
+        if mirror {
+            rect.max.x - x
+        } else {
+            rect.min.x + x
+        }
+    };
+    painter.line_segment(
+        [tip, pos2(map_x(INSET + HEAD), tip.y - HEAD * 0.85)],
+        stroke,
+    );
+    painter.line_segment(
+        [tip, pos2(map_x(INSET + HEAD), tip.y + HEAD * 0.85)],
+        stroke,
+    );
+}
+
+pub fn draw_action_icon(painter: &Painter, rect: Rect, icon: ActionIcon, color: Color32) {
+    let stroke = Stroke::new(1.6, color);
+    let c = rect.center();
+
+    match icon {
+        ActionIcon::Undo => draw_u_turn_arrow(painter, rect, color, false),
+        ActionIcon::Redo => draw_u_turn_arrow(painter, rect, color, true),
+        ActionIcon::Clear => {
+            // ゴミ箱アイコン
+            let lid_y = rect.min.y + 3.5;
+            painter.line_segment(
+                [pos2(rect.min.x + 2.0, lid_y), pos2(rect.max.x - 2.0, lid_y)],
+                stroke,
+            );
+            painter.line_segment(
+                [pos2(c.x - 2.0, lid_y - 1.5), pos2(c.x + 2.0, lid_y - 1.5)],
+                stroke,
+            );
+            let body = Rect::from_min_max(
+                pos2(rect.min.x + 3.5, lid_y + 0.5),
+                pos2(rect.max.x - 3.5, rect.max.y - 2.0),
+            );
+            painter.rect_stroke(body, CornerRadius::same(1), stroke, StrokeKind::Inside);
+        }
+        ActionIcon::Copy => {
+            // 重なった2枚のシート
+            let back = Rect::from_min_max(
+                pos2(rect.min.x + 2.0, rect.min.y + 1.5),
+                pos2(rect.max.x - 4.5, rect.max.y - 4.5),
+            );
+            let front = Rect::from_min_max(
+                pos2(rect.min.x + 4.5, rect.min.y + 4.5),
+                pos2(rect.max.x - 2.0, rect.max.y - 1.5),
+            );
+            painter.add(Shape::line(
+                vec![
+                    pos2(back.min.x, back.max.y),
+                    back.min,
+                    pos2(back.max.x, back.min.y),
+                ],
+                stroke,
+            ));
+            painter.rect_stroke(front, CornerRadius::same(1), stroke, StrokeKind::Inside);
+        }
+        ActionIcon::Save => {
+            // 下向き矢印＋トレイ（書き出し・保存）
+            let tray_top = rect.max.y - 5.5;
+            let tray_bot = rect.max.y - 2.0;
+            painter.add(Shape::line(
+                vec![
+                    pos2(rect.min.x + 2.0, tray_top),
+                    pos2(rect.min.x + 2.0, tray_bot),
+                    pos2(rect.max.x - 2.0, tray_bot),
+                    pos2(rect.max.x - 2.0, tray_top),
+                ],
+                stroke,
+            ));
+            let arrow_bot = pos2(c.x, tray_bot - 2.5);
+            painter.line_segment([pos2(c.x, rect.min.y + 1.5), arrow_bot], stroke);
+            painter.line_segment([arrow_bot, pos2(c.x - 3.2, arrow_bot.y - 3.2)], stroke);
+            painter.line_segment([arrow_bot, pos2(c.x + 3.2, arrow_bot.y - 3.2)], stroke);
+        }
+    }
+}
+
+pub fn draw_check_icon(painter: &Painter, center: Pos2, size: f32, color: Color32) {
+    let p1 = pos2(center.x - size * 0.85, center.y + size * 0.05);
+    let p2 = pos2(center.x - size * 0.2, center.y + size * 0.7);
+    let p3 = pos2(center.x + size * 0.9, center.y - size * 0.65);
+    painter.add(Shape::line(vec![p1, p2, p3], Stroke::new(1.8, color)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn segment_pos_rounds_only_outer_edges() {
+        let first = SegmentPos::First.corner_radius();
+        assert_eq!(first.nw, PILL_RADIUS);
+        assert_eq!(first.sw, PILL_RADIUS);
+        assert_eq!(first.ne, 0);
+        assert_eq!(first.se, 0);
+
+        let mid = SegmentPos::Middle.corner_radius();
+        assert_eq!(mid, CornerRadius::ZERO);
+
+        let last = SegmentPos::Last.corner_radius();
+        assert_eq!(last.nw, 0);
+        assert_eq!(last.sw, 0);
+        assert_eq!(last.ne, PILL_RADIUS);
+        assert_eq!(last.se, PILL_RADIUS);
+    }
+
+    #[test]
+    fn system_font_candidates_put_hiragino_first() {
+        let candidates = system_font_candidates();
+        assert!(candidates.len() >= 3);
+        assert_eq!(
+            candidates[0],
+            PathBuf::from("/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc")
+        );
+        assert!(candidates.iter().all(|path| path.is_absolute()));
+    }
+
+    #[test]
+    fn read_first_font_skips_unreadable_paths() {
+        let dir = std::env::temp_dir().join(format!("dood-font-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let good = dir.join("good.ttf");
+        std::fs::write(&good, b"not a real font").expect("write temp font");
+
+        let found = read_first_font(vec![dir.join("missing.ttf"), good.clone()])
+            .expect("2番目の候補が読める");
+        assert_eq!(found.0, good);
+        assert_eq!(found.1, b"not a real font");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn u_turn_arrow_is_smooth_and_mirrored() {
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(15.0, 15.0));
+        let points = u_turn_points(rect, false);
+        assert!(points.len() >= 18, "弧の分割が足りない");
+
+        let cy = rect.center().y;
+        let first = points[0];
+        let last = points[points.len() - 1];
+        assert!(
+            (first.y - (2.0 * cy - last.y)).abs() < 0.01,
+            "上下が対称でない"
+        );
+
+        // 連続する線分の向きの変化が小さい（折れ線が滑らか）
+        for window in points[1..].windows(3) {
+            let a = (window[1] - window[0]).angle();
+            let b = (window[2] - window[1]).angle();
+            let mut delta = (b - a).abs();
+            if delta > std::f32::consts::PI {
+                delta = 2.0 * std::f32::consts::PI - delta;
+            }
+            assert!(delta < 0.35, "弧の分割が粗い: {delta}");
+        }
+
+        let mirrored = u_turn_points(rect, true);
+        assert_eq!(points.len(), mirrored.len());
+        let two_cx = 2.0 * rect.center().x;
+        for (a, b) in points.iter().zip(&mirrored) {
+            assert!((a.x + b.x - two_cx).abs() < 0.01, "左右反転になっていない");
+            assert!((a.y - b.y).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn state_layer_blending_interpolates_rgb() {
+        let base = Color32::WHITE;
+        let state = Color32::BLACK;
+        let blended = blend_state(base, state, 0.1);
+        let [r, g, b, a] = blended.to_srgba_unmultiplied();
+        assert_eq!(a, 255);
+        assert!((228..=231).contains(&r), "r={r}");
+        assert_eq!(r, g);
+        assert_eq!(g, b);
+    }
+}

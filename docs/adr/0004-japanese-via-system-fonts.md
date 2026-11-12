@@ -1,7 +1,12 @@
 ---
-status: Accepted
+status: Superseded
 date: 2026-11-12
+superseded_by: 0007-unified-system-font.md
 ---
+
+> **Superseded by [ADR 0007](0007-unified-system-font.md)**: 和文だけをフォールバックに
+> 任せると英数字とメトリクスが揃わないため、和文・欧文統合フォントを `Proportional` の
+> 最優先に登録する方針へ変更した。「フォントは同梱しない」方針は 0007 でも維持している。
 
 # Context
 

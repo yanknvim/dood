@@ -4,4 +4,5 @@ pub mod app;
 pub mod export;
 pub mod render;
 pub mod scene;
+pub mod theme;
 pub mod tool;
