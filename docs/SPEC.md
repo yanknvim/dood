@@ -144,8 +144,12 @@
   ADR 0002 の差し替え条件に従う）。
 - 日本語の禁則処理・自動折り返しは行わない。テキストは `Shift+Enter` の手動改行のみで、
   長い行はキャンバスの右端でクリップされる。
-- macSKK など一部の IME では、変換確定の `Enter` が入力欄の確定としても扱われ、
-  入力欄が閉じることがある。標準の macOS 日本語 IME では発生しない。
+- **macSKK で母音（`a` `i` `u` `e` `o`）がかな変換されず、英字のまま入力される**
+  （2026-11-12 確認）。標準の macOS 日本語 IME では発生しない。原因は `winit 0.30.13` の
+  `WinitView::insert_text` が `hasMarkedText() == false` のとき何も通知しないためと考えられる。
+  macSKK が `setMarkedText:` を経由せず `insertText:` を呼ぶ場合、winit は `Ime::Commit` を
+  出さず、同じキーが通常の `KeyboardInput` → `Event::Text("a")` としてアプリに届く。
+  アプリ側では回避していない（winit 側の修正待ち）。
 - Linux/Windows は対象外（macOS のみ動作確認）。
 
 ## 15. 動かし方
