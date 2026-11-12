@@ -286,11 +286,19 @@ impl SegmentPos {
     }
 }
 
+/// ツールバーのボタンが受け取る入力。
+///
+/// 枠なしウィンドウではツールバーの余白ドラッグがウィンドウ移動になる。
+/// ボタン上からのドラッグをボタン側で受け止め、ウィンドウが動かないようにする。
+fn button_sense() -> Sense {
+    Sense::click_and_drag()
+}
+
 /// 描画ツール用の M3 Segmented Button セグメント。アイコン＋ラベルを表示する。
 pub fn tool_segment(ui: &mut Ui, tool: Tool, selected: bool, pos: SegmentPos) -> Response {
     let (width, text_galley) = tool_segment_metrics(ui, tool);
 
-    let (rect, response) = ui.allocate_exact_size(vec2(width, CONTROL_HEIGHT), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(width, CONTROL_HEIGHT), button_sense());
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -350,7 +358,7 @@ pub fn width_segment(ui: &mut Ui, width_pt: f32, selected: bool, pos: SegmentPos
     let total_width = width_segment_width(ui, width_pt);
 
     let (rect, response) =
-        ui.allocate_exact_size(vec2(total_width, CONTROL_HEIGHT), Sense::click());
+        ui.allocate_exact_size(vec2(total_width, CONTROL_HEIGHT), button_sense());
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -411,7 +419,7 @@ pub fn width_segment(ui: &mut Ui, width_pt: f32, selected: bool, pos: SegmentPos
 
 /// 円形のカラースウォッチ。選択時は外周の Primary リングと内側のチェックマーク（✓）を描く。
 pub fn color_swatch(ui: &mut Ui, color: Color32, selected: bool) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(SWATCH_SIZE), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(SWATCH_SIZE), button_sense());
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -482,7 +490,7 @@ pub enum ButtonVariant {
 pub fn icon_button(ui: &mut Ui, icon: ActionIcon, enabled: bool) -> Response {
     let size = Vec2::splat(CONTROL_HEIGHT);
     let sense = if enabled {
-        Sense::click()
+        button_sense()
     } else {
         Sense::hover()
     };
@@ -533,7 +541,7 @@ pub fn pill_button(
     let width = pill_button_width(ui, label);
 
     let sense = if enabled {
-        Sense::click()
+        button_sense()
     } else {
         Sense::hover()
     };

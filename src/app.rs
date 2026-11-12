@@ -147,6 +147,7 @@ enum Action {
 struct Pressed {
     copy: bool,
     save: bool,
+    close: bool,
     paste_image: bool,
     undo: bool,
     redo: bool,
@@ -313,6 +314,8 @@ pub struct DoodApp {
     capture_next_frame: bool,
     always_on_top: bool,
     canvas_rect: Rect,
+    /// ツールバーの矩形。枠なしウィンドウの移動（ドラッグ）に使う。
+    toolbar_rect: Rect,
 }
 
 impl DoodApp {
@@ -341,6 +344,7 @@ impl DoodApp {
             capture_next_frame: false,
             always_on_top: true,
             canvas_rect: Rect::NOTHING,
+            toolbar_rect: Rect::NOTHING,
         }
     }
 
@@ -416,6 +420,7 @@ impl DoodApp {
             let mut pressed = Pressed {
                 copy: input.consume_key(Modifiers::COMMAND, Key::C),
                 save: input.consume_key(Modifiers::COMMAND, Key::S),
+                close: input.consume_key(Modifiers::COMMAND, Key::W),
                 // ⌘V は egui がクリップボードのテキストを優先して消費するため、
                 // 画像を直接読みたいときは ⌘⇧V を使う。
                 paste_image: input.consume_key(command_shift(), Key::V),
@@ -455,6 +460,10 @@ impl DoodApp {
 
         let pressed = Self::read_keys(ctx);
 
+        if pressed.close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
         if pressed.copy {
             self.pending_export = Some(ExportKind::Copy);
         }
@@ -612,6 +621,22 @@ impl DoodApp {
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         let mut actions = Vec::new();
 
+        // ウィンドウに枠が無いので、ツールバーの余白ドラッグでウィンドウを動かす。
+        // ボタンより先に登録し、ボタンのクリックを奪わないようにする。
+        if self.toolbar_rect.is_positive() {
+            let drag = ui.interact(
+                self.toolbar_rect,
+                Id::unique("dood_toolbar_drag"),
+                Sense::drag(),
+            );
+            if drag.drag_started() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            if drag.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            }
+        }
+
         let frame = egui::Frame::new()
             .fill(theme::SURFACE_CONTAINER)
             .inner_margin(egui::Margin::symmetric(10, 8));
@@ -648,6 +673,7 @@ impl DoodApp {
         });
 
         let bar_rect = frame_res.response.rect;
+        self.toolbar_rect = bar_rect;
         ui.painter().line_segment(
             [bar_rect.left_bottom(), bar_rect.right_bottom()],
             Stroke::new(1.0, theme::OUTLINE_VARIANT),
@@ -1594,6 +1620,7 @@ mod tests {
             capture_next_frame: false,
             always_on_top: true,
             canvas_rect: Rect::NOTHING,
+            toolbar_rect: Rect::NOTHING,
         }
     }
 
@@ -1783,6 +1810,131 @@ mod tests {
         });
 
         assert_eq!(app.tool, Tool::Arrow);
+    }
+
+    #[test]
+    fn command_w_requests_closing_the_window() {
+        let mut app = test_app();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_pass(
+            egui::RawInput {
+                events: vec![key_event_with_modifiers(Key::W, Modifiers::COMMAND)],
+                ..Default::default()
+            },
+            |ctx| app.handle_shortcuts(ctx),
+        );
+        // テクスチャ差分を受け取るレンダラが居ないテストでは明示的に捨てる。
+        output.textures_delta.clear();
+
+        let viewport = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .expect("root viewport が無い");
+        assert!(
+            viewport.commands.contains(&egui::ViewportCommand::Close),
+            "⌘W がウィンドウを閉じない: {:?}",
+            viewport.commands
+        );
+    }
+
+    fn ui_frame(
+        app: &mut DoodApp,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1100.0, 800.0))),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.render_ui(ui));
+        // テクスチャ差分を受け取るレンダラが居ないテストでは明示的に捨てる。
+        output.textures_delta.clear();
+        output
+    }
+
+    fn viewport_commands(output: &egui::FullOutput) -> Vec<egui::ViewportCommand> {
+        output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .expect("root viewport が無い")
+            .commands
+            .clone()
+    }
+
+    #[test]
+    fn dragging_the_toolbar_background_starts_a_window_drag() {
+        let mut app = test_app();
+        let ctx = egui::Context::default();
+
+        // ツールバーの矩形と、その上のドラッグ領域が登録されるまで2フレーム回す。
+        let _ = ui_frame(&mut app, &ctx, Vec::new());
+        let _ = ui_frame(&mut app, &ctx, Vec::new());
+
+        // 1段目の上余白（ボタンの無いところ）を押して動かす。
+        let start = Pos2::new(1000.0, 2.0);
+        let press_output = ui_frame(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                },
+            ],
+        );
+        let move_output = ui_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(start + Vec2::new(30.0, 6.0))],
+        );
+
+        let commands: Vec<_> = [press_output, move_output]
+            .iter()
+            .flat_map(viewport_commands)
+            .collect();
+        assert!(
+            commands.contains(&egui::ViewportCommand::StartDrag),
+            "ツールバーのドラッグがウィンドウ移動にならない: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn dragging_a_toolbar_button_does_not_move_the_window() {
+        let mut app = test_app();
+        let ctx = egui::Context::default();
+        let _ = ui_frame(&mut app, &ctx, Vec::new());
+        let _ = ui_frame(&mut app, &ctx, Vec::new());
+
+        // 2番目のセグメント（矢印）の上から動かす。ボタンがドラッグを受け取る。
+        let start = Pos2::new(110.0, 24.0);
+        let outputs = [
+            ui_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(start)]),
+            ui_frame(
+                &mut app,
+                &ctx,
+                vec![egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                }],
+            ),
+            ui_frame(
+                &mut app,
+                &ctx,
+                vec![egui::Event::PointerMoved(start + Vec2::new(30.0, 6.0))],
+            ),
+        ];
+
+        let commands: Vec<_> = outputs.iter().flat_map(viewport_commands).collect();
+        assert!(
+            !commands.contains(&egui::ViewportCommand::StartDrag),
+            "ボタンからのドラッグでウィンドウが動く: {commands:?}"
+        );
     }
 
     #[test]

@@ -35,6 +35,9 @@ fn main() -> eframe::Result {
             .with_title("dood")
             .with_inner_size([1100.0, 800.0])
             .with_min_inner_size([480.0, 360.0])
+            // タイトルバーを持たない。移動はツールバーの背景ドラッグ、
+            // 閉じるのは ⌘W / Ctrl+W（macOS は ⌘Q、Linux は Alt+F4 も可）。
+            .with_decorations(false)
             .with_always_on_top(),
         ..Default::default()
     };
@@ -70,6 +73,8 @@ fn print_help() {
          \x20 ⌘S           PNG を保存してパスをクリップボードへ\n\
          \x20 ⌘V           背景画像を取り込む\n\
          \x20 ⌘⇧V          クリップボードから画像を直接貼る（ペーストボタン）\n\
-         \x20 ⌘⇧T          最前面の切り替え"
+         \x20 ⌘⇧T          最前面の切り替え\n\
+         \x20 ⌘W           ウィンドウを閉じる\n\
+         \x20               移動はツールバーの余白をドラッグ"
     );
 }
